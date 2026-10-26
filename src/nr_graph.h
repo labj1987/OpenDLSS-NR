@@ -61,6 +61,19 @@ class Graph {
 
   Activation* allocate(const std::string& label, uint32_t rows, uint32_t channels, Format format);
 
+  // Activation memory. Each activation has its own allocation until shareActivations. Record once (a warm-up)
+  // between trackLifetimes(true) and trackLifetimes(false): every use of an activation's buffer is noted with the
+  // barrier interval it falls in. A barrier orders every launch before it against every one after, chained or not,
+  // so two activations whose intervals do not overlap can share bytes.
+  void trackLifetimes(bool on);
+  // After the tracked recording has run, with nothing recorded still pending: the activations it used move into one
+  // device-local block, largest first, each at the lowest offset clear of every activation alive in an overlapping
+  // interval; the ones it never touched (allocated for routes it did not take) get a 16-byte buffer. The head and
+  // `keep` (the input features, written outside the graph) keep their own buffers. The block starts zeroed, as the
+  // activations did, and is freed with the graph. Not for a graph that captures boundaries or intermediates (they
+  // are read after the run). Returns the bytes of the moved activations before, and of the block.
+  std::pair<VkDeviceSize, VkDeviceSize> shareActivations(std::initializer_list<const Activation*> keep = {});
+
  private:
   // Window phases. Every resolution level runs its own four-phase cycle of half-window shifts; the phase advances
   // once per block at that level in visit order, and a decoder stage continues the count its encoder stage left.
@@ -135,6 +148,9 @@ class Graph {
   std::map<std::string, Activation*> boundaries_;
   Activation* head_ = nullptr;
   Activation* inputHalf_ = nullptr;
+  std::map<VkBuffer, std::pair<uint32_t, uint32_t>> lifetimes_;   // buffer -> first and last barrier interval
+  VkDeviceMemory activationBlock_ = VK_NULL_HANDLE;                // shareActivations
+  void rebind(Activation& activation, vk::Buffer buffer);         // destroys the buffer it had
 };
 
 }  // namespace nr
