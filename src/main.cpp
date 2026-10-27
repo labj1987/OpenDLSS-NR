@@ -383,7 +383,7 @@ GraphRun runGraph(vk::Context& context, nr::Model& model, nr::Kernels& kernels, 
     options.fusedBlocks = fusedBlocksEnabled();
     nr::Graph graph(context, model, kernels, geometry, options);
     run.chained = graph.chained();
-    if (!capture && sharedActivationsEnabled()) {
+    if (sharedActivationsEnabled()) {
       // a tracked warm-up, then the activations share memory by lifetime: every submission below runs shared
       context.resetDescriptorPool();
       VkCommandBuffer commands = context.beginCommands();

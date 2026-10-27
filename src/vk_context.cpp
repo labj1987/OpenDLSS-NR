@@ -635,6 +635,20 @@ std::vector<double> Context::readTimestampsMs(VkQueryPool pool, uint32_t count) 
 
 namespace vk {
 
+void Context::cmdCopyBuffer(VkCommandBuffer commands, const Buffer& source, const Buffer& target,
+                            const VkBufferCopy& region) {
+  if (useTracker_) {
+    useTracker_(source.buffer, barriers_);
+    useTracker_(target.buffer, barriers_);
+  }
+  vkCmdCopyBuffer(commands, source.buffer, target.buffer, 1, &region);
+}
+
+void Context::cmdFillZero(VkCommandBuffer commands, const Buffer& target) {
+  if (useTracker_) useTracker_(target.buffer, barriers_);
+  vkCmdFillBuffer(commands, target.buffer, 0, VK_WHOLE_SIZE, 0);
+}
+
 VkDeviceAddress Context::deviceAddress(const Buffer& buffer) const {
   if (useTracker_) useTracker_(buffer.buffer, barriers_);
   VkBufferDeviceAddressInfo info{VK_STRUCTURE_TYPE_BUFFER_DEVICE_ADDRESS_INFO};

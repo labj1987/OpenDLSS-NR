@@ -171,6 +171,9 @@ Graph::~Graph() {
   context_.freeMemory(activationBlock_);   // nothing is bound to it now
 }
 
+// The lifetimes are only as complete as the reports: every use the recording makes of a buffer, transfers (the
+// captures' copies, fills) included, must reach the use tracker (vk::Context::cmdCopyBuffer, cmdFillZero,
+// allocateSet, deviceAddress), or shareActivations takes that buffer for unused or for dead too early.
 void Graph::trackLifetimes(bool on) {
   if (!on) {
     context_.setUseTracker(nullptr);
@@ -192,8 +195,6 @@ void Graph::rebind(Activation& activation, vk::Buffer buffer) {
 }
 
 std::pair<VkDeviceSize, VkDeviceSize> Graph::shareActivations(std::initializer_list<const Activation*> keep) {
-  if (options_.captureBoundaries || options_.captureIntermediates)
-    throw std::runtime_error("shareActivations: this graph captures activations the caller reads after the run");
   if (activationBlock_) throw std::runtime_error("shareActivations: already shared");
   if (lifetimes_.empty()) throw std::runtime_error("shareActivations: no recording was tracked (trackLifetimes)");
   struct Placement {
@@ -207,6 +208,9 @@ std::pair<VkDeviceSize, VkDeviceSize> Graph::shareActivations(std::initializer_l
   for (auto& owned : activations_) {
     Activation* a = owned.get();
     if (a == head_ || std::find(keep.begin(), keep.end(), a) != keep.end()) continue;
+    // The captures are read after the run, like the head. Their copies' sources are placed like any activation,
+    // alive until the copy reads them (a use the tracked recording reported).
+    if (std::any_of(boundaries_.begin(), boundaries_.end(), [a](const auto& c) { return c.second == a; })) continue;
     before += a->buffer.size;
     auto it = lifetimes_.find(a->buffer.buffer);
     if (it == lifetimes_.end()) {
@@ -288,7 +292,9 @@ void Graph::capture(VkCommandBuffer commands, const std::string& name, const Act
   Activation* copy = allocate("boundary " + name, source.rows, source.channels, source.format);
   VkBufferCopy region{0, 0, source.validBytes()};
   context_.transferBarrier(commands);
-  vkCmdCopyBuffer(commands, source.buffer.buffer, copy->buffer.buffer, 1, &region);
+  // Through the context, so the lifetimes see the copy: the source is still read here, after its last kernel, and
+  // the capture is written here.
+  context_.cmdCopyBuffer(commands, source.buffer, copy->buffer, region);
   context_.transferBarrier(commands);
   boundaries_[name] = copy;
 }
