@@ -15,37 +15,49 @@ camera {position, target, fov, near, far} (or top-level position/target), moveSp
 environmentIntensity (IBL scale, 0..1), sun {direction, intensity}, background ("#rrggbb"),
 backgroundEnvironment (bool).
 """
-import json, os, shutil, subprocess, sys
+import argparse, json, os, shutil, subprocess, sys
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 
 
+def parse_args(argv):
+    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter,
+                                     allow_abbrev=False)
+    parser.add_argument("source", help="the scene package directory")
+    parser.add_argument("destination", help="the demo scene folder to write (build/scenes/<id>)")
+    parser.add_argument("--modules", default=os.getcwd(), help="the npm modules directory for convert_scene.mjs")
+    parser.add_argument("--name", help="the label in the demo's scene list")
+    parser.add_argument("--model", help="the .glb / .gltf inside the source directory")
+    parser.add_argument("--environment", help="the environment map inside the source directory")
+    parser.add_argument("--drop-material", action="append", default=[], metavar="NAME",
+                        help="passed to convert_scene.mjs (repeatable)")
+    parser.add_argument("--no-occlusion", action="store_true", help="pass --no-occlusion to convert_scene.mjs")
+    return parser.parse_args(argv)
+
+
 def main():
-    args = sys.argv[1:]
-    positional = [a for i, a in enumerate(args) if not a.startswith("--") and (i == 0 or not args[i - 1].startswith("--"))]
-    if len(positional) < 2:
-        raise SystemExit(__doc__)
-    src, dst = os.path.abspath(positional[0]), os.path.abspath(positional[1])
-    opt = lambda name, default=None: args[args.index(name) + 1] if name in args else default   # noqa: E731
-    drops = [args[i + 1] for i, a in enumerate(args) if a == "--drop-material"]
-    modules = opt("--modules", os.getcwd())
+    args = parse_args(sys.argv[1:])
+    src, dst = os.path.abspath(args.source), os.path.abspath(args.destination)
+    drops = args.drop_material
+    modules = args.modules
     view = {}
     if os.path.exists(os.path.join(src, "view.json")):
         view = json.load(open(os.path.join(src, "view.json"), encoding="utf-8"))
-    model = opt("--model", view.get("model"))
+    model = args.model if args.model is not None else view.get("model")
     if not model:
         candidates = [f for f in os.listdir(src) if f.lower().endswith((".glb", ".gltf"))]
         if len(candidates) != 1:
             raise SystemExit("pass --model: candidates %s" % candidates)
         model = candidates[0]
-    environment = opt("--environment", view.get("environment", "lighting.hdr" if os.path.exists(os.path.join(src, "lighting.hdr")) else None))
+    environment = args.environment if args.environment is not None else view.get(
+        "environment", "lighting.hdr" if os.path.exists(os.path.join(src, "lighting.hdr")) else None)
     os.makedirs(dst, exist_ok=True)
     name = os.path.basename(dst.rstrip("\\/"))
     out_model = os.path.join(dst, name + ".gltf")
     cmd = ["node", os.path.join(HERE, "convert_scene.mjs"), os.path.join(src, model), out_model, "--modules", modules]
     for d in drops:
         cmd += ["--drop-material", d]
-    if "--no-occlusion" in args:
+    if args.no_occlusion:
         cmd.append("--no-occlusion")
     if view.get("instances") or (os.path.exists(os.path.join(src, "instances.json")) and os.path.exists(os.path.join(src, "instances.bin"))):
         cmd += ["--instances", os.path.join(src, "instances.json"), os.path.join(src, "instances.bin")]
@@ -55,7 +67,7 @@ def main():
     print(" ".join(cmd))
     subprocess.run(cmd, check=True)
     subprocess.run([sys.executable, os.path.join(HERE, "convert_scene_textures.py"), out_model], check=True)
-    out = {"name": opt("--name", view.get("name", name)), "model": name + ".gltf"}
+    out = {"name": args.name if args.name is not None else view.get("name", name), "model": name + ".gltf"}
     if environment:
         shutil.copyfile(os.path.join(src, environment), os.path.join(dst, os.path.basename(environment)))
         out["environment"] = os.path.basename(environment)
