@@ -46,6 +46,7 @@ On Linux, the command-line tool only (the demo is Windows only):
 ```
 scripts/fetch_tools.sh                              # once: tools/ (glslang, Vulkan-Headers, volk)
 scripts/build.sh                                    # shaders, PTX, build/dlss5vk
+CXX=clang++ CC=clang scripts/build.sh               # the same with Clang
 ```
 
 ```
@@ -100,7 +101,7 @@ reference captures were made with.
 - The portable toolchain under `tools/` (git-ignored): `scripts\fetch_tools.ps1` downloads glslang 16.6.0,
   Vulkan-Headers v1.4.363, volk (pinned tags), CMake 3.31 and Ninja 1.13. No Vulkan SDK install is needed.
   `-Npm` also installs the scene converter's modules into `tools\gltf`.
-- On Linux: GCC with C++20 (tested with GCC 15.2), curl, unzip, git and Python 3. `scripts/fetch_tools.sh`
+- On Linux: GCC or Clang with C++20 (tested with GCC 15.2 and Clang 21.1), curl, unzip, git and Python 3. `scripts/fetch_tools.sh`
   downloads the same glslang, Vulkan-Headers and volk into `tools/`; `scripts/build_shaders.sh` generates the same
   shaders and PTX as `build_shaders.ps1`.
 - For the demo: Filament v1.77.0, cloned and patched by `scripts\fetch_filament.ps1` and built once by
