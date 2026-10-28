@@ -1,5 +1,6 @@
 #include "kernels.h"
 
+#include <filesystem>
 #include <fstream>
 #include <sstream>
 
@@ -714,9 +715,13 @@ void Kernels::fusedBlock32(VkCommandBuffer commands, const FusedBlock32Args& a) 
 Kernels::PtxKernel& Kernels::ptxKernel(const std::string& file, const std::string& entry) {
   auto it = ptxKernels_.find(file);
   if (it != ptxKernels_.end()) return it->second;
+  std::error_code error;
+  if (!std::filesystem::is_regular_file(ptxDirectory_ + "/" + file, error))
+    throw std::runtime_error("cannot read PTX kernel " + ptxDirectory_ + "/" + file + " (not a file)");
   std::ifstream in(ptxDirectory_ + "/" + file);
   if (!in) throw std::runtime_error("cannot read PTX kernel " + ptxDirectory_ + "/" + file);
   std::stringstream buffer; buffer << in.rdbuf();
+  if (in.bad()) throw std::runtime_error("cannot read PTX kernel " + ptxDirectory_ + "/" + file);
   PtxKernel kernel;
   const std::string text = buffer.str();
   if (size_t at = text.find("// dynamic_shared "); at != std::string::npos) kernel.dynamicShared = (uint32_t)atoi(text.c_str() + at + 18);

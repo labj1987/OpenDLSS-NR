@@ -5,6 +5,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <filesystem>
 #include <fstream>
 #include <map>
 #include <string>
@@ -21,12 +22,15 @@
 namespace {
 
 std::vector<uint8_t> readFile(const std::string& path) {
+  // A directory opens, and sizes as the largest offset there is: only a regular file is read.
+  std::error_code error;
+  if (!std::filesystem::is_regular_file(path, error)) throw std::runtime_error("cannot read " + path + " (not a file)");
   std::ifstream file(path, std::ios::binary | std::ios::ate);
   if (!file) throw std::runtime_error("cannot read " + path);
-  std::streamsize size = file.tellg();
-  file.seekg(0);
+  const std::streamsize size = file.tellg();   // -1 when the size cannot be known
+  if (size < 0 || !file.seekg(0)) throw std::runtime_error("cannot size " + path);
   std::vector<uint8_t> bytes((size_t)size);
-  file.read(reinterpret_cast<char*>(bytes.data()), size);
+  if (!file.read(reinterpret_cast<char*>(bytes.data()), size)) throw std::runtime_error("cannot read " + path);
   return bytes;
 }
 

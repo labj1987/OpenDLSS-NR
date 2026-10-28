@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <atomic>
 #include <cstring>
+#include <filesystem>
 #include <fstream>
 
 namespace vk {
@@ -414,12 +415,17 @@ std::vector<uint8_t> Context::download(const Buffer& source, VkDeviceSize size, 
 }
 
 VkShaderModule Context::loadShaderModule(const std::string& spvPath) {
+  // A directory opens, and sizes as the largest offset there is: only a regular file is a module.
+  std::error_code error;
+  if (!std::filesystem::is_regular_file(spvPath, error)) throw std::runtime_error("missing shader " + spvPath);
   std::ifstream file(spvPath, std::ios::binary | std::ios::ate);
   if (!file) throw std::runtime_error("missing shader " + spvPath);
-  std::streamsize size = file.tellg();
-  file.seekg(0);
-  std::vector<uint32_t> words((size + 3) / 4);
-  file.read(reinterpret_cast<char*>(words.data()), size);
+  const std::streamsize size = file.tellg();   // -1 when the size cannot be known
+  if (size < 0 || !file.seekg(0)) throw std::runtime_error("cannot size shader " + spvPath);
+  // SPIR-V is a sequence of 32-bit words; a size that is not a whole number of them is a truncated file.
+  if (size == 0 || size % 4) throw std::runtime_error("not a SPIR-V module (size " + std::to_string(size) + "): " + spvPath);
+  std::vector<uint32_t> words((size_t)size / 4);
+  if (!file.read(reinterpret_cast<char*>(words.data()), size)) throw std::runtime_error("cannot read shader " + spvPath);
   VkShaderModuleCreateInfo info{VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO};
   info.codeSize = size;
   info.pCode = words.data();
