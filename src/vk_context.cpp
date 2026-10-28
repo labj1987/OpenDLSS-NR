@@ -30,7 +30,16 @@ uint32_t Context::validationErrors() { return g_validationErrors.load(); }
 
 Context::Context() {
   if (volkInitialize() != VK_SUCCESS) throw std::runtime_error("vulkan-1.dll unavailable");
+  // A throw destroys what was made so far: the instance, the messenger, the device and what is on it.
+  try {
+    create();
+  } catch (...) {
+    release();
+    throw;
+  }
+}
 
+void Context::create() {
   VkApplicationInfo app{VK_STRUCTURE_TYPE_APPLICATION_INFO};
   app.pApplicationName = "dlss5-vulkan";
   app.apiVersion = VK_API_VERSION_1_3;
@@ -288,21 +297,31 @@ void Context::initCommon() {
 Context::~Context() { release(); }
 
 void Context::release() {
-  if (!device_) return;
-  vkDeviceWaitIdle(device_);
-  for (VkShaderModule module : modules_) vkDestroyShaderModule(device_, module, nullptr);
-  destroyBuffer(dummy_);
-  destroyBuffer(staging_);
-  for (VkDescriptorPool pool : descriptorPools_) vkDestroyDescriptorPool(device_, pool, nullptr);
-  vkDestroyPipelineLayout(device_, pipelineLayout_, nullptr);
-  vkDestroyDescriptorSetLayout(device_, setLayout_, nullptr);
-  vkDestroyCommandPool(device_, commandPool_, nullptr);
-  if (owned_) {
-    vkDestroyDevice(device_, nullptr);
+  // Also reached from a constructor that threw part way, so every step allows for what was never made (the
+  // vkDestroy* calls take VK_NULL_HANDLE). An adopted instance and device belong to the application.
+  if (device_) {
+    vkDeviceWaitIdle(device_);
+    for (VkShaderModule module : modules_) vkDestroyShaderModule(device_, module, nullptr);
+    modules_.clear();
+    destroyBuffer(dummy_);
+    destroyBuffer(staging_);
+    for (VkDescriptorPool& pool : descriptorPools_) { vkDestroyDescriptorPool(device_, pool, nullptr); pool = VK_NULL_HANDLE; }
+    descriptorPool_ = VK_NULL_HANDLE;
+    vkDestroyPipelineLayout(device_, pipelineLayout_, nullptr);
+    vkDestroyDescriptorSetLayout(device_, setLayout_, nullptr);
+    vkDestroyCommandPool(device_, commandPool_, nullptr);
+    pipelineLayout_ = VK_NULL_HANDLE;
+    setLayout_ = VK_NULL_HANDLE;
+    commandPool_ = VK_NULL_HANDLE;
+    if (owned_) vkDestroyDevice(device_, nullptr);
+    device_ = VK_NULL_HANDLE;
+  }
+  if (owned_ && instance_) {
     if (messenger_) vkDestroyDebugUtilsMessengerEXT(instance_, messenger_, nullptr);
     vkDestroyInstance(instance_, nullptr);
+    messenger_ = VK_NULL_HANDLE;
+    instance_ = VK_NULL_HANDLE;
   }
-  device_ = VK_NULL_HANDLE;
 }
 
 uint32_t Context::findMemoryType(uint32_t typeBits, VkMemoryPropertyFlags required) {

@@ -110,6 +110,8 @@ Model::Model(vk::Context& context, const std::string& directory, bool verifyHash
       memcpy(paddedBytes.data(), tensor.bytes, tensor.byteLength);
       // Owned by tensors_ before anything that can throw, so a failure releases it.
       const std::string name = tensor.name;
+      // A second entry of the same name would replace the first and leak its buffer.
+      if (tensors_.count(name)) throw std::runtime_error("duplicate tensor " + name);
       Tensor& stored = tensors_[name] = std::move(tensor);
       stored.raw = context_.createBuffer(padded, false, "tensor raw");
       context_.upload(stored.raw, paddedBytes.data(), padded);
