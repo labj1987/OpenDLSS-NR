@@ -570,7 +570,8 @@ int runBench(int argc, char** argv) {
   uint32_t width = (uint32_t)atoi(argValue(argc, argv, "--width", "768").c_str());
   uint32_t height = (uint32_t)atoi(argValue(argc, argv, "--height", "768").c_str());
   int frames = atoi(argValue(argc, argv, "--frames", "10").c_str());
-  if (modelDir.empty()) { fprintf(stderr, "usage: dlss5vk bench --model <dir> [--width W --height H --frames N]\n"); return 2; }
+  // (at least one frame: the median and the minimum are read from the samples)
+  if (modelDir.empty() || frames < 1) { fprintf(stderr, "usage: dlss5vk bench --model <dir> [--width W --height H --frames N]\n"); return 2; }
   vk::Context context;
   printf("device: %s\n", context.deviceName().c_str());
   nr::Model model(context, modelDir, false);
