@@ -153,6 +153,9 @@ void NrPass::destroySized() {
   }
   features_ = nullptr;
   graph_.reset();   // frees the activations
+  // The split-K scratch was sized for this graph's token counts; the next one (a resize) sizes its own. The device is
+  // idle, so nothing recorded with the old graph can still read it.
+  kernels_->releaseScratch();
 }
 
 void NrPass::fallBackToBarriers() {
