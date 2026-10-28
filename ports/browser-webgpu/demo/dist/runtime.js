@@ -9513,10 +9513,7 @@ var init_production_pipeline = __esm({
       }
       async build(runtimeProfile) {
         const [width, height] = runtimeProfile.sourceDimensions;
-        if (this.network) {
-          this.network.destroy();
-          this.network = null;
-        }
+        this.releaseResources();
         const device = this.device;
         const resources = {};
         const network = await Network.create({
@@ -9694,7 +9691,8 @@ var init_production_pipeline = __esm({
       resetHistory() {
         this.historyValid = false;
       }
-      destroy() {
+      /** The graph and every buffer sized by the field. */
+      releaseResources() {
         for (const slot of this.resources?.slots ?? []) {
           slot.color.destroy();
           slot.motion.destroy();
@@ -9704,6 +9702,9 @@ var init_production_pipeline = __esm({
         this.network?.destroy();
         this.network = null;
         this.resources = null;
+      }
+      destroy() {
+        this.releaseResources();
         this.geometry = { validWidth: 0, validHeight: 0 };
       }
     };
