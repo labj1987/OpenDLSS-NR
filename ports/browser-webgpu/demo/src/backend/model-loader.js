@@ -29,9 +29,25 @@ export class DlssNrWebGpuModel {
       onProgress?.(`Downloading the model ${(loaded / 1048576).toFixed(0)} / ${(total / 1048576).toFixed(0)} MiB`,
                    false, { loaded, total, label: 'DLSS model' });
     });
-    model.activationCapacity = Math.round(
-      activationWidth * activationHeight * BYTES_PER_ROW * activationCapacityScale);
+    model.activationCapacity = 0;
+    model.growActivationCapacity(activationWidth, activationHeight, activationCapacityScale);
     return model;
+  }
+
+  /**
+   * Make room for a padded field of this size: the capacity becomes its activation bytes times `scale`, and never
+   * shrinks. Nothing on the device changes - the weights stay where they are, and the buffers sized by the
+   * field are the pipeline's, rebuilt for each new field anyway. Returns the new capacity.
+   */
+  growActivationCapacity(fullWidth, fullHeight, scale = 1) {
+    this.activationCapacity = Math.max(this.activationCapacity,
+                                       Math.round(this.activationBytesFor(fullWidth, fullHeight) * scale));
+    return this.activationCapacity;
+  }
+
+  /** Activation bytes for a padded field (the runtime's full dimensions), without headroom. */
+  activationBytesFor(fullWidth, fullHeight) {
+    return Math.round(fullWidth * fullHeight * BYTES_PER_ROW);
   }
 
   /** What a field of this size costs in activations, which is what decides whether a resize fits. */
