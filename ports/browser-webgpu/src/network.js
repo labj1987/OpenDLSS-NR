@@ -10,6 +10,7 @@ import { Graph } from './graph.js';
 import { geometryFromValid } from './geometry.js';
 import { Matmul } from './matmul/index.js';
 import { WindowAttention, requireWorkgroupStorage } from './window/index.js';
+import { resolveTensorCores, numericsFor } from './tensor-cores.js';
 
 // Where the WGSL lives. Module-relative by default, resolved lazily: a bundler that emits anything other
 // than a module leaves `import.meta.url` empty, and a bundled page passes `shaderBase` instead.
@@ -26,8 +27,10 @@ export class Network {
    *   weights   - URL of the model directory (manifest.json plus model/stages/*)
    *   width,height - the valid image size; the padded field follows from it
    *   captureBoundaries - keep a copy of every block output, which the parity harness compares
+   *   tensorCores - 'ada', 'blackwell' or 'auto' (the default): whose tensor-core arithmetic to reproduce,
+   *                 read off the adapter unless named (src/tensor-cores.js)
    */
-  static async create({ weights, width, height, captureBoundaries = false, onProgress,
+  static async create({ weights, width, height, captureBoundaries = false, onProgress, tensorCores = 'auto',
                         extraShaders = [], before, after, shaderBase = null,
                         device: existingDevice = null, model: existingModel = null } = {}) {
     const network = new Network();
@@ -43,13 +46,14 @@ export class Network {
     }
     network.device = device;
     requireWorkgroupStorage(device);
+    network.tensorCores = resolveTensorCores(tensorCores, network.adapterInfo ?? device.adapterInfo);
 
     network.geometry = geometryFromValid(width, height);
     const geometry = network.geometry;
 
     onProgress?.('compiling kernels');
     const base = shaderBase ?? defaultBase();
-    const numerics = await fetchText('shaders/numerics.wgsl', base);
+    const numerics = numericsFor(await fetchText('shaders/numerics.wgsl', base), network.tensorCores);
     const [gemmF16, vit, ops, preprocess] = await Promise.all([
       fetchText('shaders/gemm_f16.wgsl', base), fetchText('shaders/vit.wgsl', base),
       fetchText('shaders/ops.wgsl', base), fetchText('shaders/preprocess.wgsl', base),
@@ -66,8 +70,8 @@ export class Network {
       await kernels.add(numerics, await fetchText(path, base), path, entryPoints);
     }
     network.kernels = kernels;
-    network.matmul = await Matmul.create(device);
-    network.window = WindowAttention.create(device, numerics);
+    network.matmul = await Matmul.create(device, network.tensorCores);
+    network.window = WindowAttention.create(device, numerics, network.tensorCores);
 
     if (existingModel) {
       network.model = existingModel;

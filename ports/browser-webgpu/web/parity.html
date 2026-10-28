@@ -136,9 +136,12 @@ try {
   const [width, height] = fixture.manifest.sourceDimensions;
   const network = await Network.create({
     weights: query.get('weights') ?? '/weights',
-    width, height, captureBoundaries: true,
+    width, height, captureBoundaries: true, tensorCores: query.get('tensorCores') ?? 'auto',
     onProgress: (text) => { status.textContent = text; lines.push(text); },
   });
+  const adapter = network.adapterInfo ?? network.device.adapterInfo ?? {};
+  report.note(`tensor cores: ${network.tensorCores === 'blackwell' ? 'RTX Blackwell' : 'Ada'} arithmetic ` +
+              `(adapter: ${adapter.vendor || '?'} ${adapter.architecture || '?'}; ?tensorCores= overrides)`);
   await runParity(network, fixture, report,
                   { repeat: Number(query.get('repeat') ?? 1), profile: query.has('profile') });
 

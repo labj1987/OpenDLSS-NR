@@ -30,9 +30,11 @@ const LAYOUT_FIELDS = ['WEIGHT_BYTE_OFFSET', 'BIAS_BYTE_OFFSET', 'WEIGHT_MATRIX_
                        'WEIGHT_COLUMN_OFFSET', 'OUTPUT_MATRIX_CHANNELS', 'OUTPUT_COLUMN_OFFSET'];
 
 export class Matmul {
-  static async create(device) {
+  /** `tensorCores` is 'ada' or 'blackwell': whose k32 step every GEMM reproduces (src/tensor-cores.js). */
+  static async create(device, tensorCores = 'ada') {
     const matmul = new Matmul();
     matmul.device = device;
+    matmul.tensorCores = tensorCores;
     matmul.modules = new Map();
     matmul.siluTable = await createSiluTable(device, bitQuantMatmulCode(productionMatmulCode()));
     matmul.packedSiluTable = await createPackedSiluTable(device, matmul.siluTable);
@@ -41,6 +43,7 @@ export class Matmul {
   }
 
   module(variant) {
+    variant = { ...variant, tensorCores: this.tensorCores };
     const key = variantKey(variant);
     let module = this.modules.get(key);
     if (!module) {

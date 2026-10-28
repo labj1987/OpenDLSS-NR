@@ -76,3 +76,31 @@ fn case_fdpa_f16(@builtin(global_invocation_id) id : vec3<u32>) {
   }
   results[c] = f16_bits(ada_f16_fdpa8(a, b, bitcast<f32>(inputs[base + 16u])));
 }
+
+@compute @workgroup_size(64)
+fn case_blackwell_fp8(@builtin(global_invocation_id) id : vec3<u32>) {
+  let c = id.x;
+  if (c >= arrayLength(&results)) { return; }
+  let base = c * 65u;
+  var a : array<f32, 32>;
+  var b : array<f32, 32>;
+  for (var i = 0u; i < 32u; i = i + 1u) {
+    a[i] = bitcast<f32>(inputs[base + i]);
+    b[i] = bitcast<f32>(inputs[base + 32u + i]);
+  }
+  results[c] = f16_bits(blackwell_fp8_fda32(a, b, bitcast<f32>(inputs[base + 64u])));
+}
+
+@compute @workgroup_size(64)
+fn case_blackwell_f16(@builtin(global_invocation_id) id : vec3<u32>) {
+  let c = id.x;
+  if (c >= arrayLength(&results)) { return; }
+  let base = c * 33u;
+  var a : array<f32, 16>;
+  var b : array<f32, 16>;
+  for (var i = 0u; i < 16u; i = i + 1u) {
+    a[i] = bitcast<f32>(inputs[base + i]);
+    b[i] = bitcast<f32>(inputs[base + 16u + i]);
+  }
+  results[c] = f16_bits(blackwell_f16_fda16(a, b, bitcast<f32>(inputs[base + 32u])));
+}

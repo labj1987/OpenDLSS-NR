@@ -237,3 +237,93 @@ fn ada_f16_fdpa8(a: array<f32, 8>, b: array<f32, 8>, accumulator: f32) -> f32 {
   for (var i = 0u; i < 8u; i = i + 1u) { units = units + i32(trunc(a[i] * b[i] * scale)); }
   return fixed_to_f16(units, maximum_exponent - 24);
 }
+
+// ---------------------------------------------------------------------------------------------------------
+// The same instructions on RTX Blackwell (sm_120).
+//
+// The schedule above is Ada's: a k32 FP8 step is two chained 16-product groups at 13 fractional bits, a k16 f16
+// step two 8-product groups at 24. RTX Blackwell has no chain inside the instruction. m16n8k32 FP8 and m16n8k16
+// f16 are each one fused dot product over every product of the step and the incoming accumulator: one shared
+// exponent (a zero accumulator counts at the half's minimum exponent, -14), every aligned significand truncated
+// to 25 fractional bits, an exact sum, and one RNE rounding to half. That is MMA-Sim's FDA(F=25) for the
+// architecture (arXiv 2511.10909), and it is what an RTX 5070 does on every value of block 0 of a 1486x836
+// frame - 25 bits exactly, with 24 and 26 both measurably different (dlss5vk verify --tensor-cores).
+//
+// The sum is the hard part. 33 terms of up to 2^27 units reach 2^33, beyond both an i32 and an f32's 24 bits.
+// Each truncated term is still exact in f32 (it carries at most the 22 significant bits of an f16 product), so
+// it is split at 2^12 into a high and a low part, each summed exactly in its own lane: the highs stay below
+// 33 * 2^15 and the lows below 33 * 2^12. Once the lows are carried into the highs, a total of 2^24 or more has
+// its rounding position at 2^12 or above, so the low part can only act as a sticky bit - and any value strictly
+// inside the same 2^12 interval rounds the same way. Below 2^24 the total is exact in f32 as it stands.
+// ---------------------------------------------------------------------------------------------------------
+
+/// Which tensor-core arithmetic the network kernels reproduce. The host rewrites this line (src/tensor-cores.js)
+/// for an RTX Blackwell adapter; everything that reads it folds at compile time.
+const TENSOR_CORES_BLACKWELL = false;
+
+/// The aligned sum of one fused step, as a high part in units of 2^12 and a low part, both exact in f32.
+struct Fda25 { high: f32, low: f32 }
+
+fn fda25_add(sum: Fda25, term: f32) -> Fda25 {
+  let high = trunc(term * 0.000244140625);
+  return Fda25(sum.high + high, sum.low + (term - high * 4096.0));
+}
+
+/// The total in units of 2^(exponent - 25), published once to the half grid.
+fn fda25_finish(sum: Fda25, exponent: i32) -> f32 {
+  let carry = floor(sum.low * 0.000244140625);
+  let high = sum.high + carry;
+  let low = sum.low - carry * 4096.0;
+  let sticky = high * 4096.0 + select(0.0, 2048.0, low != 0.0);
+  let total = select(sticky, high * 4096.0 + low, abs(high) < 4095.0);
+  let value = round_f16(total * pow2(exponent - 25));
+  return select(value, 0.0, value == 0.0);
+}
+
+/// One RTX Blackwell k32 FP8 step: 32 E4M3 products and a half accumulator.
+fn blackwell_fp8_fda32(a: array<f32, 32>, b: array<f32, 32>, accumulator: f32) -> f32 {
+  if ((bitcast<u32>(accumulator) & 0x7f800000u) == 0x7f800000u) { return accumulator; }
+  var exponent = f16_exponent(accumulator);
+  for (var i = 0u; i < 32u; i = i + 1u) {
+    if (a[i] != 0.0 && b[i] != 0.0) { exponent = max(exponent, e4m3_exponent(a[i]) + e4m3_exponent(b[i])); }
+  }
+  let scale = pow2(25 - exponent);
+  var sum = fda25_add(Fda25(0.0, 0.0), trunc(accumulator * scale));
+  for (var i = 0u; i < 32u; i = i + 1u) { sum = fda25_add(sum, trunc(a[i] * b[i] * scale)); }
+  return fda25_finish(sum, exponent);
+}
+
+/// One RTX Blackwell k16 f16 step: 16 half products and a half accumulator.
+fn blackwell_f16_fda16(a: array<f32, 16>, b: array<f32, 16>, accumulator: f32) -> f32 {
+  if ((bitcast<u32>(accumulator) & 0x7f800000u) == 0x7f800000u) { return accumulator; }
+  var exponent = f16_exponent(accumulator);
+  for (var i = 0u; i < 16u; i = i + 1u) {
+    if (a[i] != 0.0 && b[i] != 0.0) { exponent = max(exponent, f16_exponent(a[i]) + f16_exponent(b[i])); }
+  }
+  let scale = pow2(25 - exponent);
+  var sum = fda25_add(Fda25(0.0, 0.0), trunc(accumulator * scale));
+  for (var i = 0u; i < 16u; i = i + 1u) { sum = fda25_add(sum, trunc(a[i] * b[i] * scale)); }
+  return fda25_finish(sum, exponent);
+}
+
+/// A k32 FP8 step of whichever architecture the network is reproducing.
+fn tensor_core_fp8_k32(a: array<f32, 32>, b: array<f32, 32>, accumulator: f32) -> f32 {
+  if (TENSOR_CORES_BLACKWELL) { return blackwell_fp8_fda32(a, b, accumulator); }
+  var a0 : array<f32, 16>;
+  var b0 : array<f32, 16>;
+  var a1 : array<f32, 16>;
+  var b1 : array<f32, 16>;
+  for (var i = 0u; i < 16u; i = i + 1u) { a0[i] = a[i]; b0[i] = b[i]; a1[i] = a[i + 16u]; b1[i] = b[i + 16u]; }
+  return ada_fp8_fdpa16(a1, b1, ada_fp8_fdpa16(a0, b0, accumulator));
+}
+
+/// A k16 f16 step of whichever architecture the network is reproducing.
+fn tensor_core_f16_k16(a: array<f32, 16>, b: array<f32, 16>, accumulator: f32) -> f32 {
+  if (TENSOR_CORES_BLACKWELL) { return blackwell_f16_fda16(a, b, accumulator); }
+  var a0 : array<f32, 8>;
+  var b0 : array<f32, 8>;
+  var a1 : array<f32, 8>;
+  var b1 : array<f32, 8>;
+  for (var i = 0u; i < 8u; i = i + 1u) { a0[i] = a[i]; b0[i] = b[i]; a1[i] = a[i + 8u]; b1[i] = b[i + 8u]; }
+  return ada_f16_fdpa8(a1, b1, ada_f16_fdpa8(a0, b0, accumulator));
+}

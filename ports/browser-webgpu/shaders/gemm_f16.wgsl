@@ -1,8 +1,8 @@
 // The two f16 matrices: the 16 -> 32 input adapter in front of block 0, and the 32 -> 4 head after block 70.
 //
 // They are the only places in the network where both operands are halves rather than E4M3, so the tensor-core
-// step is the f16 one: eight products against 24 fractional bits, and an exact integer -> half conversion at
-// the end instead of a rounding of the sum. Both are small and run once a frame, so there is no tiling here -
+// step is the f16 one: on Ada two chained groups of eight products against 24 fractional bits, on RTX Blackwell
+// one fused group of sixteen against 25 (shaders/numerics.wgsl, tensor_core_f16_k16). Both are small and run once a frame, so there is no tiling here -
 // one invocation takes four output columns of one row, which is what makes its stores whole words.
 
 struct Params {
@@ -45,13 +45,13 @@ fn gemm_f16(@builtin(global_invocation_id) id : vec3<u32>) {
 
   var value : array<f32, 4>;
   for (var c = 0u; c < 4u; c = c + 1u) { value[c] = 0.0; }
-  var a : array<f32, 8>;
-  var b : array<f32, 8>;
-  for (var base = 0u; base < params.k; base = base + 8u) {
-    for (var i = 0u; i < 8u; i = i + 1u) { a[i] = activation_half(row * params.input_stride + base + i); }
+  var a : array<f32, 16>;
+  var b : array<f32, 16>;
+  for (var base = 0u; base < params.k; base = base + 16u) {
+    for (var i = 0u; i < 16u; i = i + 1u) { a[i] = activation_half(row * params.input_stride + base + i); }
     for (var c = 0u; c < 4u; c = c + 1u) {
-      for (var i = 0u; i < 8u; i = i + 1u) { b[i] = weight_half((base + i) * params.padded_n + quad + c); }
-      value[c] = ada_f16_fdpa8(a, b, value[c]);
+      for (var i = 0u; i < 16u; i = i + 1u) { b[i] = weight_half((base + i) * params.padded_n + quad + c); }
+      value[c] = tensor_core_f16_k16(a, b, value[c]);
     }
   }
 

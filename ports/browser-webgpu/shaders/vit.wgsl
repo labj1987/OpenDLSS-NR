@@ -134,19 +134,14 @@ fn vit_attend(@builtin(workgroup_id) group : vec3<u32>, @builtin(local_invocatio
   }
   workgroupBarrier();
 
-  var a : array<f32, 16>;
-  var b : array<f32, 16>;
+  var a : array<f32, 32>;
+  var b : array<f32, 32>;
   for (var key = thread; key < PADDED_TOKENS; key = key + 64u) {
-    var score = 0.0;
-    for (var half_step = 0u; half_step < 2u; half_step = half_step + 1u) {
-      let c0 = half_step * 16u;
-      for (var i = 0u; i < 16u; i = i + 1u) {
-        a[i] = query_vector[c0 + i];
-        b[i] = normalized_at(key * stride3 + head_base + 32u + c0 + i);
-      }
-      score = ada_fp8_fdpa16(a, b, score);
+    for (var i = 0u; i < 32u; i = i + 1u) {
+      a[i] = query_vector[i];
+      b[i] = normalized_at(key * stride3 + head_base + 32u + i);
     }
-    scores[key] = vit_exp_weight(score);
+    scores[key] = vit_exp_weight(tensor_core_fp8_k32(a, b, 0.0));
   }
   workgroupBarrier();
 
@@ -170,14 +165,11 @@ fn vit_attend(@builtin(workgroup_id) group : vec3<u32>, @builtin(local_invocatio
   if (thread < 32u) {
     var value = 0.0;
     for (var kb = 0u; kb < PADDED_TOKENS; kb = kb + 32u) {
-      for (var half_step = 0u; half_step < 2u; half_step = half_step + 1u) {
-        let k0 = kb + half_step * 16u;
-        for (var i = 0u; i < 16u; i = i + 1u) {
-          a[i] = weight_values[k0 + i];
-          b[i] = normalized_at((k0 + i) * stride3 + head_base + 64u + thread);
-        }
-        value = ada_fp8_fdpa16(a, b, value);
+      for (var i = 0u; i < 32u; i = i + 1u) {
+        a[i] = weight_values[kb + i];
+        b[i] = normalized_at((kb + i) * stride3 + head_base + 64u + thread);
       }
+      value = tensor_core_fp8_k32(a, b, value);
     }
     scores[thread] = round_f16(value * reciprocal);   // reuse: the scores are finished with
   }

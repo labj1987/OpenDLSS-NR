@@ -19,8 +19,10 @@
 //   weight-table  E4M3 decode and exponent extraction become a 1 KiB lookup over every byte
 //   storage       the operands and publications take the format the tensors are actually stored in
 //   tile128       two output quads per invocation
+//   blackwell     (RTX Blackwell only) the two groups of a k32 step become one fused group at F=25
 //
-// Nothing here changes a product, a truncation, or a rounding. The parity harness is what says so.
+// Nothing here but the last changes a product, a truncation, or a rounding, and that one changes them to what
+// the other architecture's tensor core does. The parity harness is what says so.
 
 import { productionMatmulCode } from './base.js';
 import { retileMatmulCode, quadMatmulCode, batchedMatmulCode } from './tiled.js';
@@ -42,6 +44,7 @@ import { packedActivationMatmulCode } from './packed-activation.js';
 import { packedResidualMatmulCode } from './packed-residual.js';
 import { halfOutputMatmulCode, halfResidualMatmulCode, rawHalfOutputMatmulCode } from './half-storage.js';
 import { tile128MatmulCode } from './tile128.js';
+import { blackwellMatmulCode } from './blackwell.js';
 
 let reduction = null;
 
@@ -62,9 +65,10 @@ function sharedReduction() {
  *   `residual`: 'e4' packed bytes or 'half' - unread when the flags say there is no skip, but it still
  *     decides the binding's type, so it is part of the variant;
  *   `batched`: several independent matrices share the dispatch, or the A tensor is wider than K;
- *   `tile128`: two output quads per invocation.
+ *   `tile128`: two output quads per invocation;
+ *   `tensorCores`: 'ada' or 'blackwell', whose k32 step to reproduce (src/tensor-cores.js).
  */
-export function variantCode({ output, residual, batched, tile128 }) {
+export function variantCode({ output, residual, batched, tile128, tensorCores = 'ada' }) {
   let code = sharedReduction();
   if (batched) code = batchedMatmulCode(code);
   code = weightTableMatmulCode(siluTableMatmulCode(bitQuantMatmulCode(layoutMatmulCode(shapeMatmulCode(code)))));
@@ -75,8 +79,10 @@ export function variantCode({ output, residual, batched, tile128 }) {
     code = packedActivationMatmulCode(code, { input: true, output: true, prefetch: true, rowOutput: true });
     if (output === 'dual') code = rawHalfOutputMatmulCode(code);
   }
-  return tile128 ? tile128MatmulCode(code) : code;
+  code = tile128 ? tile128MatmulCode(code) : code;
+  return tensorCores === 'blackwell' ? blackwellMatmulCode(code) : code;
 }
 
-export const variantKey = ({ output, residual, batched, tile128 }) =>
-  `${output}/${residual}${batched ? '/batched' : ''}${tile128 ? '/tile128' : ''}`;
+export const variantKey = ({ output, residual, batched, tile128, tensorCores = 'ada' }) =>
+  `${output}/${residual}${batched ? '/batched' : ''}${tile128 ? '/tile128' : ''}` +
+  `${tensorCores === 'blackwell' ? '/blackwell' : ''}`;
