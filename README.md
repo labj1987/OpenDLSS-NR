@@ -54,6 +54,7 @@ build\dlss5vk.exe bench   --model <dir> --width 768 --height 768
 build\dlss5vk.exe profile --model <dir> --width 768 --height 768   # per-dispatch timings
 build\dlss5vk.exe parity  --model <dir> --fixture <dir>            # bit-exactness against a fixture
 build\dlss5vk.exe verify  --model <dir> --fixture <dir>            # block-0 kernel-by-kernel bisect
+                         [--tensor-cores auto|ada|blackwell]          # which tensor core the CPU reference models
 python scripts\ptx\test_fast_divmod.py                             # the PTX divider, over every n < 2^24 (numpy)
 ```
 

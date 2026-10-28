@@ -47,6 +47,29 @@ accumulation) for the two f16 GEMMs. Consequences that the code depends on:
   launches carry them as the `z` dimension of the grid: FFN contract 4096/1024, qkv 1024/512, projection
   1024/256, FFN expand unsplit. Split-K reproduces exactly that structure in separate workgroups.
 
+### The same instruction on RTX Blackwell
+
+Everything above is Ada's tensor core, and it is not the only one. On RTX Blackwell (compute capability 12.x,
+the RTX 50 series) the k32 FP8 step and the k16 f16 step are each **one fused group over all of their products**,
+not a chain of two:
+
+```
+E = max(exp(accumulator), max over all K pairs of exp(a) + exp(b))      # a zero accumulator counts at -14
+sum = trunc(acc * 2^(25 - E)) + sum_i trunc(a_i b_i * 2^(25 - E))        # F25, truncated, exact sum
+result = roundF16(sum * 2^E)                                              # once per k32 (FP8) or k16 (f16) step
+```
+
+This is MMA-Sim's FDA(F=25) for the architecture ([arXiv 2511.10909](https://arxiv.org/abs/2511.10909)).
+Measured on an RTX 5070 with `dlss5vk verify` on a 1486x836 frame, it equals the hardware on every value of
+block 0 (all 1,376,256 rows of the f16 adapter, the QKV GEMM and the FFN contract chain), while 24 or 26 fractional
+bits do not. The native kernels need nothing for it - they run the hardware instruction, and so does NVIDIA's own
+runtime, which is why `parity` passes on both architectures - but a frame computed with one architecture's
+arithmetic differs from the other's in nearly every output value by a code or two, from block 0 on. The CPU
+reference and the WebGPU port, which reproduce the arithmetic instead of executing it, have to be told which one
+they are reproducing: `ref::setTensorCores`, chosen by `dlss5vk verify` from the device's compute capability
+(`--tensor-cores ada|blackwell` overrides), and the port's `tensorCores` option, read off the WebGPU adapter.
+The K order, the residual seeding the accumulator and the split-K partitions are the same on both.
+
 ## Where the half roundings are
 
 | step | rounding |
@@ -119,6 +142,9 @@ inputs so a mismatch names one kernel. It covers the dense 32-channel block and 
 the 512 split block and **the ViT have no CPU reference**: they are checked only by their two GPU routes agreeing
 with the native captures at every block boundary. That is still ground truth rather than a shared guess, but a
 ViT failure cannot be bisected the way a block-0 failure can.
+
+On RTX Blackwell the reference is switched to that architecture's step (above); every check of block 0 is
+then equal on the RTX 5070.
 
 `verify` compares values, not bits (a NaN equals a NaN, `+0` equals `-0`): it exists to name the kernel where a
 difference starts. `parity` is the gate.
