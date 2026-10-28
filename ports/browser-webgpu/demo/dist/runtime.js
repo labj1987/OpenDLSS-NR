@@ -5588,7 +5588,9 @@ var init_model = __esm({
        * weights are 141 MiB, which is long enough that a demo has to say something while it waits.
        */
       async load(directory, onProgress) {
-        const manifest = await (await fetch(`${directory}/manifest.json`)).json();
+        const listing = await fetch(`${directory}/manifest.json`);
+        if (!listing.ok) throw new Error(`cannot read ${directory}/manifest.json (HTTP ${listing.status}); is NR_WEIGHTS set?`);
+        const manifest = await listing.json();
         this.blockCount = manifest.totals.blockCount;
         const total = manifest.stages.reduce((sum, stage) => sum + stage.packedByteLength, 0);
         let loaded = 0;

@@ -85,7 +85,10 @@ export class Model {
    * weights are 141 MiB, which is long enough that a demo has to say something while it waits.
    */
   async load(directory, onProgress) {
-    const manifest = await (await fetch(`${directory}/manifest.json`)).json();
+    // A missing model directory is the usual first-run failure; say so rather than fail to parse the 404.
+    const listing = await fetch(`${directory}/manifest.json`);
+    if (!listing.ok) throw new Error(`cannot read ${directory}/manifest.json (HTTP ${listing.status}); is NR_WEIGHTS set?`);
+    const manifest = await listing.json();
     this.blockCount = manifest.totals.blockCount;
 
     const total = manifest.stages.reduce((sum, stage) => sum + stage.packedByteLength, 0);
