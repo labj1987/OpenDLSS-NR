@@ -108,8 +108,9 @@ int runVerify(int argc, char** argv) {
   std::string fixtureDir = argValue(argc, argv, "--fixture");
   std::string shaderDir = argValue(argc, argv, "--shaders", executableDirectory(argv[0]) + "/shaders");
   uint32_t sampleRows = (uint32_t)atoi(argValue(argc, argv, "--rows", "2048").c_str());
-  if (modelDir.empty() || fixtureDir.empty()) {
-    fprintf(stderr, "usage: dlss5vk verify --model <dir> --fixture <dir> [--rows N]\n");
+  std::string coresArg = argValue(argc, argv, "--tensor-cores", "auto");
+  if (modelDir.empty() || fixtureDir.empty() || (coresArg != "auto" && coresArg != "ada" && coresArg != "blackwell")) {
+    fprintf(stderr, "usage: dlss5vk verify --model <dir> --fixture <dir> [--rows N] [--tensor-cores auto|ada|blackwell]\n");
     return 2;
   }
   std::string manifestText;
@@ -119,6 +120,19 @@ int runVerify(int argc, char** argv) {
   uint32_t validHeight = (uint32_t)manifest["sourceDimensions"][1].integer();
 
   vk::Context context;
+  // The GPU kernels run the hardware MMA, so their arithmetic is the card's; the CPU reference has to be told
+  // which one that is. Compute capability 12.x is RTX Blackwell (sm_120), whose k32/k16 steps are single fused
+  // dot products (docs/numerics.md); everything else is held to the Ada model this project was built on.
+  {
+    VkPhysicalDeviceCudaKernelLaunchPropertiesNV cuda{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_CUDA_KERNEL_LAUNCH_PROPERTIES_NV};
+    VkPhysicalDeviceProperties2 properties{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2};
+    properties.pNext = &cuda;
+    vkGetPhysicalDeviceProperties2(context.physical(), &properties);
+    bool blackwell = coresArg == "blackwell" || (coresArg == "auto" && cuda.computeCapabilityMajor == 12);
+    ref::setTensorCores(blackwell ? ref::TensorCores::Blackwell : ref::TensorCores::Ada);
+    printf("compute capability %u.%u: CPU reference uses the %s tensor-core arithmetic\n", cuda.computeCapabilityMajor,
+           cuda.computeCapabilityMinor, blackwell ? "RTX Blackwell" : "Ada");
+  }
   nr::Model model(context, modelDir, false);
   nr::Kernels kernels(context, shaderDir);
   kernels.setSiluTable(ref::siluTable());

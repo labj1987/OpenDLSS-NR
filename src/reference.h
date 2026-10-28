@@ -21,6 +21,19 @@ float adaFp8Fdpa16(const float* a, const float* b, int count, float accumulator)
 // Ada FP16 m16n8k16 half step: 8 products, F=24 truncation, integer publication.
 float adaF16Fdpa8(const float* a, const float* b, int count, float accumulator);
 
+// RTX Blackwell m16n8k32 FP8 / m16n8k16 FP16: one fused step over all `count` products and the accumulator,
+// F=25 truncation, half RNE result (MMA-Sim's FDA). `fp8` picks the E4M3 or the half exponent floor.
+float blackwellFda(const float* a, const float* b, int count, float accumulator, bool fp8);
+
+// Which tensor-core arithmetic the reference reproduces. The GPU kernels use the hardware instruction and so
+// follow the card they run on; the reference has to be told. Ada is the default.
+enum class TensorCores { Ada, Blackwell };
+void setTensorCores(TensorCores cores);
+TensorCores tensorCores();
+// One k32 FP8 step and one k16 FP16 step of the selected architecture.
+float fp8Step32(const float* a, const float* b, float accumulator);
+float f16Step16(const float* a, const float* b, float accumulator);
+
 struct GemmRef {
   const nr::Tensor* tensor = nullptr;
   uint32_t weightByteOffset = 0;

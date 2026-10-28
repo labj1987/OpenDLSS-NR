@@ -16,39 +16,39 @@ int normalExponent(float value) {
 int e4m3Exponent(float value) { return std::max(normalExponent(value), -6); }
 int f16Exponent(float value) { return std::max(normalExponent(value), -14); }
 
-uint32_t roundShiftRightEven(uint32_t value, uint32_t shift) {
+uint64_t roundShiftRightEven(uint64_t value, uint32_t shift) {
   if (shift == 0) return value;
-  if (shift > 31) return 0;
-  uint32_t truncated = value >> shift;
-  uint32_t remainder = value & ((1u << shift) - 1);
-  uint32_t halfway = 1u << (shift - 1);
+  if (shift > 63) return 0;
+  uint64_t truncated = value >> shift;
+  uint64_t remainder = value & ((1ull << shift) - 1);
+  uint64_t halfway = 1ull << (shift - 1);
   return truncated + ((remainder > halfway || (remainder == halfway && (truncated & 1))) ? 1u : 0u);
 }
 
-int countLeadingZeros(uint32_t value) {
+int countLeadingZeros(uint64_t value) {
   int count = 0;
-  for (int bit = 31; bit >= 0; --bit) { if (value & (1u << bit)) break; ++count; }
+  for (int bit = 63; bit >= 0; --bit) { if (value & (1ull << bit)) break; ++count; }
   return count;
 }
 
-// Exact signed F24 integer -> IEEE half.
+// Exact signed fixed-point integer times 2^binaryExponent -> IEEE half, RNE.
 float fixedToF16(int64_t fixedSum, int binaryExponent) {
   if (fixedSum == 0) return 0.0f;
   bool negative = fixedSum < 0;
-  uint32_t magnitude = (uint32_t)(negative ? -fixedSum : fixedSum);
-  uint32_t msb = 31 - (uint32_t)countLeadingZeros(magnitude);
+  uint64_t magnitude = (uint64_t)(negative ? -fixedSum : fixedSum);
+  uint32_t msb = 63 - (uint32_t)countLeadingZeros(magnitude);
   int valueExponent = (int)msb + binaryExponent;
   uint32_t halfBits = negative ? 0x8000 : 0;
   if (valueExponent >= -14) {
-    uint32_t significand = msb > 10 ? roundShiftRightEven(magnitude, msb - 10) : magnitude << (10 - msb);
+    uint64_t significand = msb > 10 ? roundShiftRightEven(magnitude, msb - 10) : magnitude << (10 - msb);
     if (significand >= 2048) { significand = 1024; valueExponent += 1; }
     if (valueExponent >= 16) halfBits |= 0x7c00;
-    else { halfBits |= (uint32_t)(valueExponent + 15) << 10; halfBits |= significand - 1024; }
+    else { halfBits |= (uint32_t)(valueExponent + 15) << 10; halfBits |= (uint32_t)(significand - 1024); }
   } else {
     int subnormalScale = binaryExponent + 24;
-    uint32_t mantissa = subnormalScale >= 0 ? magnitude << subnormalScale
+    uint64_t mantissa = subnormalScale >= 0 ? magnitude << subnormalScale
                                             : roundShiftRightEven(magnitude, (uint32_t)-subnormalScale);
-    halfBits |= std::min(mantissa, 1024u);
+    halfBits |= (uint32_t)std::min<uint64_t>(mantissa, 1024u);
   }
   return num::f16ToF32((uint16_t)halfBits);
 }
@@ -167,6 +167,50 @@ float adaF16Fdpa8(const float* a, const float* b, int count, float accumulator) 
   return fixedToF16(fixedSum, maximumExponent - 24);
 }
 
+// RTX Blackwell (sm_120) has no chain inside an instruction: m16n8k32 FP8 and m16n8k16 FP16 are each one fused
+// dot product over all K products and the incoming accumulator. The shared exponent covers the accumulator and
+// every product (a zero accumulator counts at the half's minimum exponent, -14), every aligned significand is
+// truncated to 25 fractional bits, the fixed-point sum is exact, and the result rounds to half once (RNE).
+// This is MMA-Sim's FDA(F=25) for RTX Blackwell (arXiv 2511.10909), and it matches the hardware on every value
+// of block 0 of a 1486x836 frame (dlss5vk verify on an RTX 5070).
+float blackwellFda(const float* a, const float* b, int count, float accumulator, bool fp8) {
+  if (std::isinf(accumulator) || std::isnan(accumulator)) return accumulator;
+  int maximumExponent = f16Exponent(accumulator);
+  bool any = accumulator != 0.0f;
+  for (int i = 0; i < count; ++i) {
+    if (a[i] == 0.0f || b[i] == 0.0f) continue;
+    int e = fp8 ? e4m3Exponent(a[i]) + e4m3Exponent(b[i]) : f16Exponent(a[i]) + f16Exponent(b[i]);
+    maximumExponent = std::max(maximumExponent, e);
+    any = true;
+  }
+  if (!any) return 0.0f;
+  int64_t fixedSum = 0;
+  // Every operand is a binary FP8/FP16 number, so x * 2^(25 - max) is exact in double before the truncation.
+  if (accumulator != 0.0f) fixedSum += (int64_t)std::trunc((double)accumulator * std::ldexp(1.0, 25 - maximumExponent));
+  for (int i = 0; i < count; ++i) {
+    if (a[i] != 0.0f && b[i] != 0.0f)
+      fixedSum += (int64_t)std::trunc((double)a[i] * (double)b[i] * std::ldexp(1.0, 25 - maximumExponent));
+  }
+  return fixedToF16(fixedSum, maximumExponent - 25);
+}
+
+namespace {
+TensorCores g_tensorCores = TensorCores::Ada;
+}
+
+void setTensorCores(TensorCores cores) { g_tensorCores = cores; }
+TensorCores tensorCores() { return g_tensorCores; }
+
+float fp8Step32(const float* a, const float* b, float accumulator) {
+  if (g_tensorCores == TensorCores::Blackwell) return blackwellFda(a, b, 32, accumulator, true);
+  return adaFp8Fdpa16(a + 16, b + 16, 16, adaFp8Fdpa16(a, b, 16, accumulator));
+}
+
+float f16Step16(const float* a, const float* b, float accumulator) {
+  if (g_tensorCores == TensorCores::Blackwell) return blackwellFda(a, b, 16, accumulator, false);
+  return adaF16Fdpa8(a + 8, b + 8, 8, adaF16Fdpa8(a, b, 8, accumulator));
+}
+
 float gemmFp8Element(const GemmRef& gemm, const float* inputRow, uint32_t column, float initial) {
   float sums = roundF16(initial);
   float partitionSums = 0.0f;
@@ -180,8 +224,7 @@ float gemmFp8Element(const GemmRef& gemm, const float* inputRow, uint32_t column
                                          nr::packedWeightIndex(logical, column + gemm.weightColumnOffset, gemm.Nmatrix)];
       b[k] = (code & 0x7f) == 0x7f ? 0.0f : num::e4m3ToF32(code);
     }
-    sums = adaFp8Fdpa16(a, b, 16, sums);
-    sums = adaFp8Fdpa16(a + 16, b + 16, 16, sums);
+    sums = fp8Step32(a, b, sums);
     if (gemm.partition && (((kb + 32) % gemm.partition) == 0 || kb + 32 >= gemm.K)) {
       partitionSums = kb < gemm.partition ? sums : roundF16(partitionSums + sums);
       sums = 0.0f;
@@ -201,13 +244,13 @@ float gemmF16Element(const nr::Tensor& tensor, uint32_t weightByteOffset, uint32
     return tile * 256 + lane * 8 + ((nn >> 3) & 1) * 4 + fragment;
   };
   float value = 0.0f;
-  float a[8], b[8];
-  for (uint32_t base = 0; base < K; base += 8) {
-    for (uint32_t i = 0; i < 8; ++i) {
+  float a[16], b[16];
+  for (uint32_t base = 0; base < K; base += 16) {
+    for (uint32_t i = 0; i < 16; ++i) {
       a[i] = roundF16(inputRow[base + i]);
       b[i] = loadHalf(tensor, weightByteOffset + weightIndex(base + i, column) * 2);
     }
-    value = adaF16Fdpa8(a, b, 8, value);
+    value = f16Step16(a, b, value);
   }
   return value;
 }
@@ -258,8 +301,7 @@ void windowAttendRef(const std::vector<float>& normalized, uint32_t width, uint3
         values[keyLocal][c] = valid ? normalized[((uint32_t)ky * width + (uint32_t)kx) * stride3 + headBase + 64 + c] : 0.0f;
       }
       float prior = loadRelativeBias(tensor, relativeByteOffset, head, queryLocal, keyLocal);
-      float score = adaFp8Fdpa16(q, keys[keyLocal], 16, prior);
-      score = adaFp8Fdpa16(q + 16, keys[keyLocal] + 16, 16, score);
+      float score = fp8Step32(q, keys[keyLocal], prior);
       scores[keyLocal] = expWeight(roundF16(score));
     }
     auto physical = [&](uint32_t p) { return scores[inverseTiledToken(p)]; };
@@ -278,14 +320,14 @@ void windowAttendRef(const std::vector<float>& normalized, uint32_t width, uint3
     for (uint32_t key = 0; key < 64; ++key) scores[key] = fp8Domain(roundF16(scores[key] * reciprocal));
     for (int c = 0; c < 32; ++c) {
       float value = 0.0f;
-      for (uint32_t group = 0; group < 4; ++group) {
-        float w[16], v[16];
-        for (uint32_t i = 0; i < 16; ++i) {
-          uint32_t keyLocal = inverseTiledToken(group * 16 + i);
+      for (uint32_t step = 0; step < 2; ++step) {
+        float w[32], v[32];
+        for (uint32_t i = 0; i < 32; ++i) {
+          uint32_t keyLocal = inverseTiledToken(step * 32 + i);
           w[i] = scores[keyLocal];
           v[i] = values[keyLocal][c];
         }
-        value = adaFp8Fdpa16(w, v, 16, value);
+        value = fp8Step32(w, v, value);
       }
       out[queryLocal * 32 + c] = fp8Domain(value);
     }
