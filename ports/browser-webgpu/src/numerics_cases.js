@@ -182,6 +182,44 @@ export function numericsCases(sections) {
     });
   }
 
+  // The same two instructions as RTX Blackwell executes them: one fused step over all 32 E4M3 or 16 half
+  // products, 25 fractional bits. The fixed-point bound below does not apply: these sums are carried in two
+  // exact f32 lanes rather than one i32 (shaders/numerics.wgsl).
+  for (const { tag, seed, width, fp8, entryPoint, name } of [
+    { tag: 'BWF8', seed: 0x27d4eb2f, width: 32, fp8: true, entryPoint: 'case_blackwell_fp8',
+      name: 'blackwellFda over 32 random E4M3 products' },
+    { tag: 'BW16', seed: 0x165667b1, width: 16, fp8: false, entryPoint: 'case_blackwell_f16',
+      name: 'blackwellFda over 16 random half products' },
+  ]) {
+    const expected = halves(tag);
+    const rng = new Xorshift(seed);
+    const draw = fp8 ? () => num.e4m3ToNumber(rng.next() & 0xff) : () => num.f16ToNumber(finiteHalf(rng.next()));
+    const a = new Float64Array(expected.length * width);
+    const b = new Float64Array(expected.length * width);
+    const accumulators = new Float64Array(expected.length);
+    const stride = width * 2 + 1;
+    const packed = new Uint32Array(expected.length * stride);
+    for (let c = 0; c < expected.length; ++c) {
+      for (let i = 0; i < width; ++i) a[c * width + i] = draw();
+      for (let i = 0; i < width; ++i) b[c * width + i] = draw();
+      accumulators[c] = num.f16ToNumber(finiteHalf(rng.next()));
+      packed.set(packF32(a.subarray(c * width, (c + 1) * width)), c * stride);
+      packed.set(packF32(b.subarray(c * width, (c + 1) * width)), c * stride + width);
+      packed[c * stride + width * 2] = num.f32Bits(accumulators[c]);
+    }
+    cases.push({
+      name,
+      count: expected.length,
+      expected,
+      kind: 'half',
+      actual: (c) => num.f16Bits(num.blackwellFda(a.subarray(c * width, (c + 1) * width),
+                                                  b.subarray(c * width, (c + 1) * width), width,
+                                                  accumulators[c], fp8)),
+      entryPoint,
+      gpuInputs: packed,
+    });
+  }
+
   // The ViT exponential has no entry in the fixture: the Vulkan tree computes it only in its shaders, and its
   // CPU reference never needed one. The JS oracle stands in, so this case checks that the WGSL and the JS
   // transcribed the same function - weaker than the others, and marked as such.

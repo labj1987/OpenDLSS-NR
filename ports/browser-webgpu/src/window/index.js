@@ -25,14 +25,15 @@ export function requireWorkgroupStorage(device) {
 }
 
 export class WindowAttention {
-  static create(device, numerics) {
+  /** `numerics` is shaders/numerics.wgsl as the network uses it; `tensorCores` is 'ada' or 'blackwell'. */
+  static create(device, numerics, tensorCores = 'ada') {
     const attention = new WindowAttention();
     attention.device = device;
     // numerics.wgsl runs on f32 bit patterns and does not enable f16; this kernel needs the type, and the
     // directive has to come before every declaration in the module.
     attention.module = device.createShaderModule({
       label: 'window attention',
-      code: ['enable f16;', numerics, windowAttentionCode()].join('\n'),
+      code: ['enable f16;', numerics, windowAttentionCode(tensorCores)].join('\n'),
     });
     return attention;
   }

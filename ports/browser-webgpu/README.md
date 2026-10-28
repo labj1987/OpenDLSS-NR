@@ -19,6 +19,11 @@ bit for bit against what native produced from a recorded display proxy. The one 
 older 8-bit capture of native's image in `nr512`, matched within one code. Same fixtures, same fixture contract
 and same verdicts as `dlss5vk parity`.
 
+On an RTX 5070, against native and NVIDIA's runtime on the same card, a 1486x836 frame matches bit for bit too:
+the composed image (3,726,888 values), the head, and all 75 block boundaries. That card is an RTX Blackwell, whose
+tensor cores compute a different function from the 4070 SUPER's, so the port reproduces whichever one it is
+running on; see *Which tensor core* below.
+
 ## What the browser does not have
 
 | the Vulkan version uses | WebGPU offers | what this port does |
@@ -101,6 +106,23 @@ with WebGPU, so each frame crosses between the two APIs: the colour target and t
 into typed arrays, uploaded, run through the graph, and the composition kernel writes both the displayed image
 and the next frame's history. A 1904×929 frame costs about 15 ms of readback and 465 ms of network.
 
+## Which tensor core
+
+Native's result is whatever the card's tensor cores compute, and that is not one function. On Ada a k32 FP8 step
+is two chained groups of 16 products at 13 fractional bits, and a k16 f16 step two groups of 8 at 24; on RTX
+Blackwell each step is one fused group over all of its products at 25 (`docs/numerics.md` in the repository
+root). Native runs the instruction and gets the right answer on either. The port writes the arithmetic out, so
+it has to pick one, and a frame computed with the wrong one differs from native in nearly every value by a code
+or two - 3,600,297 of 3,726,888 composed values on an RTX 5070, before the port knew about Blackwell.
+
+`src/tensor-cores.js` reads the architecture off the WebGPU adapter and the kernels follow it: the GEMM and the
+window attention get one more transform that merges the two group functions of each k32 step into one
+(`src/matmul/blackwell.js`, `src/window/blackwell.js`), and the f16 GEMM and the ViT switch through
+`tensor_core_fp8_k32` / `tensor_core_f16_k16` in `shaders/numerics.wgsl`. `Network.create({ tensorCores })`
+and the parity page's `?tensorCores=ada|blackwell` override the choice. A fused step's sum reaches 2^33, beyond
+an i32 and an f32 alike, so it is carried in two exact f32 lanes; the WGSL has the argument for why that is
+still exact. Both architectures' steps are in the self-test, against the Vulkan CPU reference.
+
 ## What the port cannot reproduce, and why
 
 **The three noise lanes, in principle.** The input features carry three Box-Muller Gaussians, and native
@@ -152,6 +174,7 @@ untested, and its only check was a second hand-written copy of the same arithmet
 
 ```
 src/numerics.js         the publication grid on the CPU: the port's oracle
+src/tensor-cores.js     Ada or RTX Blackwell: which tensor core's arithmetic the kernels reproduce
 src/numerics_cases.js   what the fixture answers, shared by the Node check and the browser self-test
 src/gpu.js              the thin WebGPU layer: device, buffers, compile, dispatch
 src/passes.js           pipelines, tensors, and the recorder the graph builds into

@@ -7,6 +7,11 @@
 //      /DVK_ENABLE_BETA_EXTENSIONS /I tools\Vulkan-Headers\include /I tools\volk /I src ^
 //      ports\browser-webgpu\tools\dump_numerics.cpp /Fe:build\dump_numerics.exe
 //
+// or on Linux, after scripts/fetch_tools.sh:
+//
+//   g++ -std=c++20 -O2 -DVK_ENABLE_BETA_EXTENSIONS -I tools/Vulkan-Headers/include -I tools/volk -I src \
+//      ports/browser-webgpu/tools/dump_numerics.cpp -o build/dump_numerics
+//
 // then run it from the repository root. Only the scalar entry points are used, so nothing links against
 // Vulkan; the unreferenced parts of reference.cpp are discarded.
 //
@@ -148,6 +153,32 @@ int main() {
       out[c] = num::f16Bits(ref::adaF16Fdpa8(a, b, 8, accumulator));
     }
     put("FD16", out.data(), out.size() * 2);
+  }
+
+  // The same two instructions on RTX Blackwell: one fused step over all 32 E4M3 or 16 half products, F=25.
+  {
+    Xorshift rng{0x27d4eb2fu};
+    std::vector<uint16_t> out(kFp8Cases);
+    for (uint32_t c = 0; c < kFp8Cases; ++c) {
+      float a[32], b[32];
+      for (int i = 0; i < 32; ++i) a[i] = shaderE4m3ToF32((uint8_t)(rng.next() & 0xff));
+      for (int i = 0; i < 32; ++i) b[i] = shaderE4m3ToF32((uint8_t)(rng.next() & 0xff));
+      float accumulator = num::f16ToF32(finiteHalf(rng.next()));
+      out[c] = num::f16Bits(ref::blackwellFda(a, b, 32, accumulator, true));
+    }
+    put("BWF8", out.data(), out.size() * 2);
+  }
+  {
+    Xorshift rng{0x165667b1u};
+    std::vector<uint16_t> out(kF16Cases);
+    for (uint32_t c = 0; c < kF16Cases; ++c) {
+      float a[16], b[16];
+      for (int i = 0; i < 16; ++i) a[i] = num::f16ToF32(finiteHalf(rng.next()));
+      for (int i = 0; i < 16; ++i) b[i] = num::f16ToF32(finiteHalf(rng.next()));
+      float accumulator = num::f16ToF32(finiteHalf(rng.next()));
+      out[c] = num::f16Bits(ref::blackwellFda(a, b, 16, accumulator, false));
+    }
+    put("BW16", out.data(), out.size() * 2);
   }
 
   std::string path = "ports/browser-webgpu/web/fixtures/numerics.bin";

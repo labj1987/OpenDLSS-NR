@@ -180,6 +180,44 @@ export function adaF16Fdpa8(a, b, count, accumulator) {
   return fixedToF16(units, maximumExponent - 24);
 }
 
+// RTX Blackwell's version of the same two instructions: one fused step over every product of a k32 FP8 or k16
+// f16 step, 25 fractional bits, an exact sum and one RNE rounding (shaders/numerics.wgsl has the argument). The
+// sum is carried the way the WGSL carries it, as an exact high part in units of 2^12 and an exact low part,
+// rather than as one double - which would also be exact here, and would let the two drift apart unnoticed.
+
+/** Add one truncated, aligned term to a [high, low] sum. */
+export function fda25Add(sum, term) {
+  const high = Math.trunc(toF32(term * 0.000244140625));
+  sum[0] = toF32(sum[0] + high);
+  sum[1] = toF32(sum[1] + toF32(term - toF32(high * 4096)));
+  return sum;
+}
+
+/** The total in units of 2^(exponent - 25), published once to the half grid. */
+export function fda25Finish(sum, exponent) {
+  const carry = Math.floor(toF32(sum[1] * 0.000244140625));
+  const high = toF32(sum[0] + carry);
+  const low = toF32(sum[1] - toF32(carry * 4096));
+  const sticky = toF32(toF32(high * 4096) + (low !== 0 ? 2048 : 0));
+  const total = Math.abs(high) < 4095 ? toF32(toF32(high * 4096) + low) : sticky;
+  const value = roundF16(toF32(total * 2 ** (exponent - 25)));
+  return value === 0 ? 0 : value;
+}
+
+/** One RTX Blackwell fused step: `count` products (32 E4M3 or 16 halves) and a half accumulator. */
+export function blackwellFda(a, b, count, accumulator, fp8) {
+  if (!Number.isFinite(accumulator)) return accumulator;
+  const exponentOf = fp8 ? e4m3Exponent : f16Exponent;
+  let exponent = f16Exponent(accumulator);
+  for (let i = 0; i < count; ++i) {
+    if (a[i] !== 0 && b[i] !== 0) exponent = Math.max(exponent, exponentOf(a[i]) + exponentOf(b[i]));
+  }
+  const scale = 2 ** (25 - exponent);
+  const sum = fda25Add([0, 0], Math.trunc(toF32(accumulator * scale)));
+  for (let i = 0; i < count; ++i) fda25Add(sum, Math.trunc(toF32(toF32(a[i] * b[i]) * scale)));
+  return fda25Finish(sum, exponent);
+}
+
 // The three functions below each round in a particular precision, and JavaScript's doubles are wider than all
 // of them, so every f32-level step is put through Math.fround. Where native fuses a multiply and an add,
 // the product happens to be exact in f32, so one fround over the whole expression is that fused operation.

@@ -6493,9 +6493,148 @@ var init_layout = __esm({
   }
 });
 
+// ../src/tensor-cores.js
+function tensorCoresOf(info2) {
+  const architecture = String(info2?.architecture ?? "").toLowerCase();
+  const vendor = String(info2?.vendor ?? "").toLowerCase();
+  return vendor === "nvidia" && architecture === "blackwell" ? BLACKWELL : ADA;
+}
+function resolveTensorCores(requested, info2) {
+  if (requested === void 0 || requested === null || requested === "auto") return tensorCoresOf(info2);
+  if (requested !== ADA && requested !== BLACKWELL) {
+    throw new Error(`unknown tensor-core model "${requested}"; expected "${ADA}", "${BLACKWELL}" or "auto"`);
+  }
+  return requested;
+}
+function numericsFor(numerics, cores) {
+  if (!numerics.includes(ADA_LINE)) throw new Error("shaders/numerics.wgsl has no tensor-core switch");
+  return cores === BLACKWELL ? numerics.replace(ADA_LINE, "const TENSOR_CORES_BLACKWELL = true;") : numerics;
+}
+function functionText(code, name) {
+  const start = code.indexOf(`fn ${name}(`);
+  if (start < 0) throw new Error(`no function ${name} to merge`);
+  const end = code.indexOf("\n}\n", start);
+  if (end < 0) throw new Error(`function ${name} does not end`);
+  return { start, end: end + 3, text: code.slice(start, end + 3) };
+}
+function blocksOf(text) {
+  const pattern = /\n {2}\{\n[\s\S]*?\n {2}\}/g;
+  const blocks = [];
+  const between = [];
+  let last = 0;
+  for (const match of text.matchAll(pattern)) {
+    between.push(text.slice(last, match.index));
+    blocks.push(match[0]);
+    last = match.index + match[0].length;
+  }
+  between.push(text.slice(last));
+  return { blocks, between };
+}
+function mergeGroupFunctions(code, first, second, merged, rewrite) {
+  const a = functionText(code, first);
+  const b = functionText(code, second);
+  const pa = blocksOf(a.text);
+  const pb = blocksOf(b.text);
+  const count = pa.blocks.length;
+  if (count % 2 || pb.blocks.length !== count || pa.between.length !== count + 1) {
+    throw new Error(`${first} and ${second} do not have the shape of two group functions`);
+  }
+  const half = count / 2;
+  for (let i = 1; i < count; ++i) {
+    if (i !== half && (pa.between[i].trim() !== "" || pb.between[i].trim() !== "")) {
+      throw new Error(`${first}: unexpected text between its blocks`);
+    }
+  }
+  const extend = (block) => block.replace(/^( {4}(maximum\d\d) = )(.+);$/gm, (line, lead, name, value) => value.startsWith("max(") ? line : `${lead}max(${name}, ${value});`);
+  const header = pa.between[0].replace(`fn ${first}(`, `fn ${merged}(`);
+  const text = header + pa.blocks.slice(0, half).join("") + pb.blocks.slice(0, half).map(extend).join("") + pa.between[half] + pa.blocks.slice(half).join("") + pb.blocks.slice(half).join("") + pa.between[count];
+  const rewritten = rewrite(text);
+  if (rewritten === text) throw new Error(`${merged}: the arithmetic was not rewritten`);
+  if (b.start < a.end) throw new Error(`${second} is expected to follow ${first}`);
+  return code.slice(0, a.start) + rewritten + code.slice(a.end, b.start) + code.slice(b.end);
+}
+function replaceExactly(text, from, to, count = 1) {
+  const pieces = text.split(from);
+  if (pieces.length - 1 !== count) {
+    throw new Error(`expected ${count} occurrence(s) of ${JSON.stringify(from.slice(0, 60))}, found ${pieces.length - 1}`);
+  }
+  return pieces.join(to);
+}
+function replaceAll(text, pattern, to) {
+  if (!pattern.test(text)) throw new Error(`no match for ${pattern}`);
+  pattern.lastIndex = 0;
+  return text.replace(pattern, to);
+}
+var ADA, BLACKWELL, ADA_LINE;
+var init_tensor_cores = __esm({
+  "../src/tensor-cores.js"() {
+    ADA = "ada";
+    BLACKWELL = "blackwell";
+    ADA_LINE = "const TENSOR_CORES_BLACKWELL = false;";
+  }
+});
+
+// ../src/window/blackwell.js
+function fuser(products) {
+  return (text) => {
+    let out = replaceExactly(text, "var maximum = 191u;", "var maximum = 198u;");
+    out = replaceExactly(out, "u32(140 - exponent)", "u32(152 - exponent)");
+    if (products) out = replaceExactly(out, "u32(136 - exponent)", "u32(148 - exponent)");
+    out = replaceExactly(
+      out,
+      "  var sum = trunc(accumulator * alignment);",
+      "  var sum = fda25_add(Fda25(0.0, 0.0), trunc(accumulator * alignment));"
+    );
+    out = replaceAll(out, /sum \+= trunc\(([\s\S]*?)\);\n/g, "sum = fda25_add(sum, trunc($1));\n");
+    return replaceExactly(
+      out,
+      "return round_attention_half(select(sum, 0.0, sum == 0.0) * bitcast<f32>(u32(exponent + 114) << 23u));",
+      "return fda25_finish(sum, exponent);"
+    );
+  };
+}
+function blackwellWindowCode(code) {
+  code = mergeGroupFunctions(code, "tiled_qk_0", "tiled_qk_16", "tiled_qk_32", fuser(false));
+  code = mergeGroupFunctions(code, "tiled_value_0", "tiled_value_16", "tiled_value_32_0", fuser(true));
+  code = mergeGroupFunctions(code, "tiled_value_32", "tiled_value_48", "tiled_value_32_32", fuser(true));
+  code = replaceExactly(code, `fn tiled_qk(query:u32, key:u32, start:u32, accumulator:f32)->f32 {
+  if(start==0u){return tiled_qk_0(query,key,accumulator);}
+  return tiled_qk_16(query,key,accumulator);
+}
+`, "");
+  code = replaceAll(
+    code,
+    /let low = tiled_qk\(query, key, 0u, prior\);\n\s*(score\.[xyzw]) = native_exp_weight\(f16\(tiled_qk\(query, key, 16u, low\)\)\);/g,
+    "$1 = native_exp_weight(f16(tiled_qk_32(query, key, prior)));"
+  );
+  code = replaceExactly(code, `fn tiled_value(query:u32, component:u32, start:u32, accumulator:f32)->f32 {
+  if(start==0u){return tiled_value_0(query,component,accumulator);}
+  if(start==16u){return tiled_value_16(query,component,accumulator);}
+  if(start==32u){return tiled_value_32(query,component,accumulator);}
+  return tiled_value_48(query,component,accumulator);
+}`, `fn tiled_value(query:u32, component:u32, start:u32, accumulator:f32)->f32 {
+  if(start==0u){return tiled_value_32_0(query,component,accumulator);}
+  return tiled_value_32_32(query,component,accumulator);
+}`);
+  code = replaceExactly(code, `        for (var group = 0u; group < 4u; group++) {
+          value = tiled_value(query, component, group * 16u, value);
+        }`, `        for (var step = 0u; step < 2u; step++) {
+          value = tiled_value(query, component, step * 32u, value);
+        }`);
+  if (/tiled_(qk|value)_(0|16|48)\(|tiled_value_32\(/.test(code)) {
+    throw new Error("fused window step: an Ada 16-product group is still called");
+  }
+  return code;
+}
+var init_blackwell = __esm({
+  "../src/window/blackwell.js"() {
+    init_tensor_cores();
+  }
+});
+
 // ../src/window/variants.js
-function windowAttentionCode() {
-  if (cached) return cached;
+function windowAttentionCode(tensorCores = "ada") {
+  if (cached.has(tensorCores)) return cached.get(tensorCores);
   const queries = WINDOW_QUERIES;
   const threads = WINDOW_THREADS;
   let code = compactScoreWindowCode(
@@ -6505,8 +6644,10 @@ function windowAttentionCode() {
   );
   code = rotateExponentWindowCode(unrolledWindowCode(halfValueWindowCode(floatSumWindowCode(code))));
   code = packedOutputWindowCode(fusedNormalizeWindowCode(code, threads), queries, threads);
-  cached = layoutWindowCode(windowBaseCode() + code);
-  return cached;
+  if (tensorCores === "blackwell") code = blackwellWindowCode(code);
+  const composed = layoutWindowCode(windowBaseCode() + code);
+  cached.set(tensorCores, composed);
+  return composed;
 }
 var WINDOW_QUERIES, WINDOW_THREADS, cached;
 var init_variants = __esm({
@@ -6524,9 +6665,10 @@ var init_variants = __esm({
     init_normalize_fused();
     init_packed_output();
     init_layout();
+    init_blackwell();
     WINDOW_QUERIES = 32;
     WINDOW_THREADS = 512;
-    cached = null;
+    cached = /* @__PURE__ */ new Map();
   }
 });
 
@@ -6543,12 +6685,13 @@ var init_window = __esm({
     init_variants();
     WINDOW_WORKGROUP_STORAGE = 32768;
     WindowAttention = class _WindowAttention {
-      static create(device, numerics) {
+      /** `numerics` is shaders/numerics.wgsl as the network uses it; `tensorCores` is 'ada' or 'blackwell'. */
+      static create(device, numerics, tensorCores = "ada") {
         const attention = new _WindowAttention();
         attention.device = device;
         attention.module = device.createShaderModule({
           label: "window attention",
-          code: ["enable f16;", numerics, windowAttentionCode()].join("\n")
+          code: ["enable f16;", numerics, windowAttentionCode(tensorCores)].join("\n")
         });
         return attention;
       }
@@ -8200,6 +8343,58 @@ var init_tile128 = __esm({
   }
 });
 
+// ../src/matmul/blackwell.js
+function fuse(text) {
+  let out = replaceExactly(text, "select(vec4<i32>(-21),", "select(vec4<i32>(-14),");
+  out = replaceExactly(out, "vec4<i32>(140) - exponents", "vec4<i32>(152) - exponents");
+  out = replaceExactly(out, "vec4<i32>(136) - exponents", "vec4<i32>(148) - exponents");
+  out = replaceExactly(
+    out,
+    "  var sums = trunc(accumulator * alignment);",
+    "  var sums = fda25_add4(Fda25x4(vec4<f32>(0.0), vec4<f32>(0.0)), trunc(accumulator * alignment));"
+  );
+  out = replaceAll(out, /sums \+= trunc\(([\s\S]*?)\);\n/g, "sums = fda25_add4(sums, trunc($1));\n");
+  const tail = out.indexOf("  let scale = bitcast<vec4<f32>>(vec4<u32>(exponents + vec4<i32>(114))");
+  if (tail < 0) throw new Error("fused GEMM step: no publication to replace");
+  return out.slice(0, tail) + "  return fda25_finish4(sums, exponents);\n}\n";
+}
+function blackwellMatmulCode(code) {
+  code = mergeGroupFunctions(code, "quad_fdpa_16_0", "quad_fdpa_16_16", "quad_fda_32", fuse);
+  code = replaceAll(
+    code,
+    /( *)(quad\d) = quad_fdpa_16_0\(([^;]*), \2\);\n\s*(quad\d) = quad_fdpa_16_0\(([^;]*), \4\);\n\s*\2 = quad_fdpa_16_16\(\3, \2\);\n\s*\4 = quad_fdpa_16_16\(\5, \4\);\n/g,
+    "$1$2 = quad_fda_32($3, $2);\n$1$4 = quad_fda_32($5, $4);\n"
+  );
+  if (code.includes("quad_fdpa_16_")) throw new Error("fused GEMM step: an Ada 16-product group is still called");
+  return replaceExactly(code, "\n@compute", FDA25_QUAD + "\n@compute");
+}
+var FDA25_QUAD;
+var init_blackwell2 = __esm({
+  "../src/matmul/blackwell.js"() {
+    init_tensor_cores();
+    FDA25_QUAD = `
+// The fused step's sum for four outputs: a high part in units of 2^12 and a low part, both exact in f32.
+struct Fda25x4 { high: vec4<f32>, low: vec4<f32> }
+
+fn fda25_add4(sum: Fda25x4, term: vec4<f32>) -> Fda25x4 {
+  let high = trunc(term * 0.000244140625);
+  return Fda25x4(sum.high + high, sum.low + (term - high * 4096.0));
+}
+
+fn fda25_finish4(sum: Fda25x4, exponents: vec4<i32>) -> vec4<f32> {
+  let carry = floor(sum.low * 0.000244140625);
+  let high = sum.high + carry;
+  let low = sum.low - carry * 4096.0;
+  let sticky = high * 4096.0 + select(vec4<f32>(0.0), vec4<f32>(2048.0), low != vec4<f32>(0.0));
+  let total = select(sticky, high * 4096.0 + low, abs(high) < vec4<f32>(4095.0));
+  let scale = bitcast<vec4<f32>>(vec4<u32>(exponents + vec4<i32>(102)) << vec4<u32>(23u));
+  let rounded = vec4<f32>(vec4<f16>(total * scale));
+  return select(rounded, vec4<f32>(0.0), rounded == vec4<f32>(0.0));
+}
+`;
+  }
+});
+
 // ../src/matmul/variants.js
 function sharedReduction() {
   if (reduction) return reduction;
@@ -8211,7 +8406,7 @@ function sharedReduction() {
   reduction = seededExponentMatmulCode(grouped);
   return reduction;
 }
-function variantCode({ output: output2, residual, batched, tile128 }) {
+function variantCode({ output: output2, residual, batched, tile128, tensorCores = "ada" }) {
   let code = sharedReduction();
   if (batched) code = batchedMatmulCode(code);
   code = weightTableMatmulCode(siluTableMatmulCode(bitQuantMatmulCode(layoutMatmulCode(shapeMatmulCode(code)))));
@@ -8222,7 +8417,8 @@ function variantCode({ output: output2, residual, batched, tile128 }) {
     code = packedActivationMatmulCode(code, { input: true, output: true, prefetch: true, rowOutput: true });
     if (output2 === "dual") code = rawHalfOutputMatmulCode(code);
   }
-  return tile128 ? tile128MatmulCode(code) : code;
+  code = tile128 ? tile128MatmulCode(code) : code;
+  return tensorCores === "blackwell" ? blackwellMatmulCode(code) : code;
 }
 var reduction, variantKey;
 var init_variants2 = __esm({
@@ -8247,8 +8443,9 @@ var init_variants2 = __esm({
     init_packed_residual();
     init_half_storage();
     init_tile128();
+    init_blackwell2();
     reduction = null;
-    variantKey = ({ output: output2, residual, batched, tile128 }) => `${output2}/${residual}${batched ? "/batched" : ""}${tile128 ? "/tile128" : ""}`;
+    variantKey = ({ output: output2, residual, batched, tile128, tensorCores = "ada" }) => `${output2}/${residual}${batched ? "/batched" : ""}${tile128 ? "/tile128" : ""}${tensorCores === "blackwell" ? "/blackwell" : ""}`;
   }
 });
 
@@ -8280,9 +8477,11 @@ var init_matmul = __esm({
       "OUTPUT_COLUMN_OFFSET"
     ];
     Matmul = class _Matmul {
-      static async create(device) {
+      /** `tensorCores` is 'ada' or 'blackwell': whose k32 step every GEMM reproduces (src/tensor-cores.js). */
+      static async create(device, tensorCores = "ada") {
         const matmul = new _Matmul();
         matmul.device = device;
+        matmul.tensorCores = tensorCores;
         matmul.modules = /* @__PURE__ */ new Map();
         matmul.siluTable = await createSiluTable(device, bitQuantMatmulCode(productionMatmulCode()));
         matmul.packedSiluTable = await createPackedSiluTable(device, matmul.siluTable);
@@ -8290,6 +8489,7 @@ var init_matmul = __esm({
         return matmul;
       }
       module(variant) {
+        variant = { ...variant, tensorCores: this.tensorCores };
         const key2 = variantKey(variant);
         let module = this.modules.get(key2);
         if (!module) {
@@ -9292,6 +9492,7 @@ var init_network = __esm({
     init_geometry();
     init_matmul();
     init_window();
+    init_tensor_cores();
     defaultBase = () => new URL("..", import.meta.url);
     fetchText = async (path, base) => {
       const response = await fetch(new URL(path, base));
@@ -9304,6 +9505,8 @@ var init_network = __esm({
        *   weights   - URL of the model directory (manifest.json plus model/stages/*)
        *   width,height - the valid image size; the padded field follows from it
        *   captureBoundaries - keep a copy of every block output, which the parity harness compares
+       *   tensorCores - 'ada', 'blackwell' or 'auto' (the default): whose tensor-core arithmetic to reproduce,
+       *                 read off the adapter unless named (src/tensor-cores.js)
        */
       static async create({
         weights,
@@ -9311,6 +9514,7 @@ var init_network = __esm({
         height,
         captureBoundaries = false,
         onProgress,
+        tensorCores = "auto",
         extraShaders = [],
         before,
         after,
@@ -9329,11 +9533,12 @@ var init_network = __esm({
         }
         network.device = device;
         requireWorkgroupStorage(device);
+        network.tensorCores = resolveTensorCores(tensorCores, network.adapterInfo ?? device.adapterInfo);
         network.geometry = geometryFromValid(width, height);
         const geometry = network.geometry;
         onProgress?.("compiling kernels");
         const base = shaderBase ?? defaultBase();
-        const numerics = await fetchText("shaders/numerics.wgsl", base);
+        const numerics = numericsFor(await fetchText("shaders/numerics.wgsl", base), network.tensorCores);
         const [gemmF16, vit, ops, preprocess] = await Promise.all([
           fetchText("shaders/gemm_f16.wgsl", base),
           fetchText("shaders/vit.wgsl", base),
@@ -9360,8 +9565,8 @@ var init_network = __esm({
           await kernels.add(numerics, await fetchText(path, base), path, entryPoints);
         }
         network.kernels = kernels;
-        network.matmul = await Matmul.create(device);
-        network.window = WindowAttention.create(device, numerics);
+        network.matmul = await Matmul.create(device, network.tensorCores);
+        network.window = WindowAttention.create(device, numerics, network.tensorCores);
         if (existingModel) {
           network.model = existingModel;
           network.borrowedModel = true;

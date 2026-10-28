@@ -18,8 +18,10 @@
 //               separate normalize pass and never stores a normalized tensor
 //   packed out  the attended values are published as the E4M3 words the tensor holds
 //   layout      the geometry becomes pipeline overrides, so the window arithmetic folds
+//   blackwell   (RTX Blackwell only) the two groups of each k32 step become one fused group at F=25
 //
-// Nothing here changes a product, a truncation, or a rounding. The parity harness is what says so.
+// Nothing here but the last changes a product, a truncation, or a rounding, and that one changes them to what
+// the other architecture's tensor core does. The parity harness is what says so.
 
 import { windowBaseCode, WINDOW_LAYOUT_FIELDS } from './base.js';
 import { TILED_WINDOW_WGSL } from './tiled.js';
@@ -34,6 +36,7 @@ import { rotateExponentWindowCode } from './rotate-exponent.js';
 import { fusedNormalizeWindowCode } from './normalize-fused.js';
 import { packedOutputWindowCode } from './packed-output.js';
 import { layoutWindowCode } from './layout.js';
+import { blackwellWindowCode } from './blackwell.js';
 
 /** 32 queries per workgroup on 512 invocations: the widest tile that stays inside 32 KB of shared memory. */
 export const WINDOW_QUERIES = 32;
@@ -41,10 +44,11 @@ export const WINDOW_THREADS = 512;
 
 export { WINDOW_LAYOUT_FIELDS };
 
-let cached = null;
+const cached = new Map();
 
-export function windowAttentionCode() {
-  if (cached) return cached;
+/** `tensorCores` is 'ada' or 'blackwell' (src/tensor-cores.js). */
+export function windowAttentionCode(tensorCores = 'ada') {
+  if (cached.has(tensorCores)) return cached.get(tensorCores);
   const queries = WINDOW_QUERIES;
   const threads = WINDOW_THREADS;
   let code = compactScoreWindowCode(
@@ -52,6 +56,8 @@ export function windowAttentionCode() {
     queries, threads);
   code = rotateExponentWindowCode(unrolledWindowCode(halfValueWindowCode(floatSumWindowCode(code))));
   code = packedOutputWindowCode(fusedNormalizeWindowCode(code, threads), queries, threads);
-  cached = layoutWindowCode(windowBaseCode() + code);
-  return cached;
+  if (tensorCores === 'blackwell') code = blackwellWindowCode(code);
+  const composed = layoutWindowCode(windowBaseCode() + code);
+  cached.set(tensorCores, composed);
+  return composed;
 }
