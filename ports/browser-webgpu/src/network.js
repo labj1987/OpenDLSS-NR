@@ -192,6 +192,7 @@ export class Network {
   get boundaryNames() { return [...this.graph.boundaries.keys()]; }
 
   destroy() {
+    this.recorder.destroy();
     this.tensors.destroy();
     this.matmul.destroy();
     // A borrowed model and device outlive this graph: the host rebuilds the graph on every resize.

@@ -7017,6 +7017,13 @@ ${source}`, name);
       get dispatchCount() {
         return this.passes.filter((item) => item.kind === "dispatch").length;
       }
+      /** The parameter block and the profiling queries; the tensors and pipelines belong to others. */
+      destroy() {
+        this.paramsBuffer?.destroy();
+        this.querySet?.destroy();
+        this.queryResolve?.destroy();
+        this.queryRead?.destroy();
+      }
     };
   }
 });
@@ -9465,6 +9472,7 @@ var init_network = __esm({
         return [...this.graph.boundaries.keys()];
       }
       destroy() {
+        this.recorder.destroy();
         this.tensors.destroy();
         this.matmul.destroy();
         if (!this.borrowedModel) {

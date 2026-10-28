@@ -307,4 +307,12 @@ export class Recorder {
   }
 
   get dispatchCount() { return this.passes.filter((item) => item.kind === 'dispatch').length; }
+
+  /** The parameter block and the profiling queries; the tensors and pipelines belong to others. */
+  destroy() {
+    this.paramsBuffer?.destroy();
+    this.querySet?.destroy();
+    this.queryResolve?.destroy();
+    this.queryRead?.destroy();
+  }
 }
