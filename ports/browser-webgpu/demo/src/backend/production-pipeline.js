@@ -44,7 +44,8 @@ export class DlssNrProductionPipeline {
 
   async build(runtimeProfile) {
     const [width, height] = runtimeProfile.sourceDimensions;
-    if (this.network) { this.network.destroy(); this.network = null; }
+    // A resize rebuilds everything sized by the field: the previous frame's buffers go with its graph.
+    this.releaseResources();
     const device = this.device;
     const resources = {};
 
@@ -195,13 +196,18 @@ export class DlssNrProductionPipeline {
 
   resetHistory() { this.historyValid = false; }
 
-  destroy() {
+  /** The graph and every buffer sized by the field. */
+  releaseResources() {
     for (const slot of this.resources?.slots ?? []) { slot.color.destroy(); slot.motion.destroy(); }
     for (const key of ['scene', 'motion', 'image']) this.resources?.[key]?.destroy();
     for (const buffer of this.resources?.history ?? []) buffer.destroy();
     this.network?.destroy();
     this.network = null;
     this.resources = null;
+  }
+
+  destroy() {
+    this.releaseResources();
     this.geometry = { validWidth: 0, validHeight: 0 };
   }
 }
