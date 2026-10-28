@@ -33,6 +33,8 @@ export class Network {
     const network = new Network();
     // A host that already owns a device and the weights passes them in; the pages that stand alone do not.
     let device = existingDevice;
+    // Only a device made here is this graph's to destroy; a caller's outlives it.
+    network.ownsDevice = !existingDevice;
     if (!device) {
       onProgress?.('requesting a device');
       const acquired = await requestDevice();
@@ -195,7 +197,9 @@ export class Network {
     this.recorder.destroy();
     this.tensors.destroy();
     this.matmul.destroy();
-    // A borrowed model and device outlive this graph: the host rebuilds the graph on every resize.
-    if (!this.borrowedModel) { this.model.destroy(); this.device.destroy(); }
+    // A borrowed model or device outlives this graph: the host rebuilds the graph on every resize. Each is
+    // checked on its own, since a host may lend a device and still have the graph load the weights onto it.
+    if (!this.borrowedModel) this.model.destroy();
+    if (this.ownsDevice) this.device.destroy();
   }
 }

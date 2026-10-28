@@ -9320,6 +9320,7 @@ var init_network = __esm({
       } = {}) {
         const network = new _Network();
         let device = existingDevice;
+        network.ownsDevice = !existingDevice;
         if (!device) {
           onProgress?.("requesting a device");
           const acquired = await requestDevice();
@@ -9492,10 +9493,8 @@ var init_network = __esm({
         this.recorder.destroy();
         this.tensors.destroy();
         this.matmul.destroy();
-        if (!this.borrowedModel) {
-          this.model.destroy();
-          this.device.destroy();
-        }
+        if (!this.borrowedModel) this.model.destroy();
+        if (this.ownsDevice) this.device.destroy();
       }
     };
   }
