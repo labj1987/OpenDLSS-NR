@@ -75,7 +75,7 @@ The K order, the residual seeding the accumulator and the split-K partitions are
 | step | rounding |
 | --- | --- |
 | SiLU | `clamp(x, -4, 4)`, `p = fma(-0.055908203125, |x|, 0.447265625)`, `p = fma(x, p, 0.89453125)`, `x * p`. Five half operations, each rounded once. A 65536-entry f16->f16 table is equivalent and is what the GLSL kernels use |
-| cosine norm (window) | `r[c] = fma(v[c], v[c], f16(v[c+16]^2))` for 16 pairs, then a stride 8/4/2/1 tree, every level a half; `inversesqrt` in f32 then to half |
+| cosine norm (window) | `r[c] = fma(v[c], v[c], f16(v[c+16]^2))` for 16 pairs, a true half fma (one rounding of the exact sum: an f32 sum rounded first can sit exactly on a half midpoint the exact value is off, when the addend is tiny), then a stride 8/4/2/1 tree, every level a half; `inversesqrt` in f32 then to half |
 | cosine norm (ViT) | the same tree, but `r[c] = f16(f32(v[c])^2 + f32(f16(v[c+16]^2)))`: the low square stays in f32, the high one is rounded first |
 | scaled skip | the product of two halves is exact in f32 and rounds once, so `f16(a) * f16(s)` is the same publication as the f32 spelling |
 | 2x2 pool | `((a + b) + (c + d)) * 0.25`, four half operations |
