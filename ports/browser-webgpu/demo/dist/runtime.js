@@ -5880,9 +5880,43 @@ fn publish_e4_code(value: f32) -> u32 { return encode_e4m3(f16_bits(value)); }
 
 fn native_exp_weight(score: f16) -> f16 { return f16(exp_weight(f32(score))); }
 
-// Both operands are halves, so their product is exact in f32 and the single rounding here is the fused
-// multiply-add's own. This is the pair fold the normalization's square sum is specified with.
-fn nr_norm_fma(a: f16, b: f16, c: f16) -> f16 { return f16(f32(a) * f32(b) + f32(c)); }
+// The cosine norm's pair term is a *half* fused multiply-add, fma(v, v, f16(w * w)): one rounding of the exact
+// square plus the addend. The square of a half is exact in f32, but the sum is not always, and an f32 sum
+// rounded first can land exactly on a half midpoint the exact value is not on - a subnormal addend under a
+// large square is the usual way, and the result is then one half step off. It cannot be repaired in f32
+// either: a shader compiler is free to simplify a two-sum error term to zero, and this one does. So the sum is
+// formed in integers. Both terms are non-negative, the larger is placed with its top bit at 2^28, the smaller
+// is shifted to the same scale with anything shifted out kept as a sticky bit, and the total - at most 2^30 -
+// is rounded to half once.
+fn half_magnitude_parts(bits: u32) -> vec2<i32> {
+  let exponent = i32((bits >> 10u) & 31u);
+  let mantissa = i32(bits & 1023u);
+  if (exponent == 0) { return vec2<i32>(mantissa, -24); }
+  return vec2<i32>(mantissa | 1024, exponent - 25);
+}
+
+fn align_with_sticky(value: u32, exponent: i32, scale: i32) -> u32 {
+  if (exponent >= scale) { return value << u32(exponent - scale); }
+  let shift = u32(scale - exponent);
+  if (shift >= 32u) { return select(0u, 1u, value != 0u); }
+  return (value >> shift) | select(0u, 1u, (value & ((1u << shift) - 1u)) != 0u);
+}
+
+fn nr_norm_fma(a: f16, b: f16, c: f16) -> f16 {
+  // a and b are the same value here (the low channel, squared); c is a half square, so nothing is negative.
+  let low = half_magnitude_parts(f16_bits(f32(a)) & 0x7fffu);
+  let high = half_magnitude_parts(f16_bits(f32(c)) & 0x7fffu);
+  let square = u32(low.x) * u32(low.x);
+  let square_exponent = 2 * low.y;
+  let addend = u32(high.x);
+  if (square == 0u) { return c; }
+  let square_top = square_exponent + i32(31u - countLeadingZeros(square));
+  var top = square_top;
+  if (addend != 0u) { top = max(top, high.y + i32(31u - countLeadingZeros(addend))); }
+  let scale = top - 28;
+  let total = align_with_sticky(square, square_exponent, scale) + align_with_sticky(addend, high.y, scale);
+  return f16(fixed_to_f16(i32(total), scale));
+}
 
 /** Physical (4x4-tiled) token -> natural row-major token inside an 8x8 window. */
 fn inverse_tiled_token(token: u32) -> u32 {

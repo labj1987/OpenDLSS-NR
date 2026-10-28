@@ -19,8 +19,8 @@ bit for bit against what native produced from a recorded display proxy. The one 
 older 8-bit capture of native's image in `nr512`, matched within one code. Same fixtures, same fixture contract
 and same verdicts as `dlss5vk parity`.
 
-On an RTX 5070, against native and NVIDIA's runtime on the same card, a 1486x836 frame matches bit for bit too:
-the composed image (3,726,888 values), the head, and all 75 block boundaries. That card is an RTX Blackwell, whose
+On an RTX 5070, against native and NVIDIA's runtime on the same card, eight 1486x836 frames match bit for bit
+too: the composed image of each (3,726,888 values), and for one of them the head and all 75 block boundaries. That card is an RTX Blackwell, whose
 tensor cores compute a different function from the 4070 SUPER's, so the port reproduces whichever one it is
 running on; see *Which tensor core* below.
 
@@ -136,7 +136,7 @@ matches native's head bit for bit — but that is a measurement on one vendor, n
 the tone response that proxy is built from belongs to the viewer rendering the scene. It is a faithful proxy
 of what is on screen, which is what the network reads, but it is not the one native was measured against.
 
-## Five things the verification caught
+## Six things the verification caught
 
 Worth recording, because all five are the kind of thing a port gets silently wrong.
 
@@ -160,6 +160,15 @@ WebGPU validation failure is a no-op, not a throw, and a no-op reads exactly lik
 *writable* bindings is writable aliasing, which WebGPU refuses at `encoder.finish()`, before anything runs,
 with no dispatch to blame. The whole frame was dropped and every output stayed at zero. `Network.run` now
 validates the first frame inside an error scope, and each writable binding has its own placeholder.
+
+**A half fused multiply-add is not an f32 one rounded.** The cosine norm folds each pair as
+`fma(v, v, f16(w * w))` in halves. Computed as an f32 sum and then rounded, it rounds twice, and once in a while
+the f32 sum lands exactly on a half midpoint the exact sum is not on - a subnormal `w * w` under a large `v * v`
+is enough. One square sum then comes out one half step low, the norm one step high, one K byte one code off, and
+from there the rest of the network: 40% of the composed values of one 1486x836 frame. The CPU reference made the
+same double rounding through a `(float)` cast, so the two agreed with each other. Repairing it in f32 with a
+two-sum does not work either: the shader compiler simplified the error term to zero. The port now forms that
+sum in integers (`nr_norm_fma` in `src/window/base.js`).
 
 **A name is not a value, and an ungated stage is an unchecked one.** The post block's skip comes from block
 0's *output*; in the Vulkan graph the variable holding it is called `adapter`, though it is allocated as

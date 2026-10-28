@@ -90,6 +90,18 @@ float expWeight(float score) {
 }
 
 float addF16(float a, float b) { return roundF16((float)((double)a + (double)b)); }
+
+// RNE of a double to half in one step. A detour through float would round twice, and the second rounding can
+// turn a value just off a half midpoint into the midpoint itself: that is exactly the half fma's case, whose
+// exact sum (a double holds it) can carry a tiny addend that float drops.
+float roundF16Exact(double value) {
+  if (value == 0.0 || !std::isfinite(value)) return roundF16((float)value);
+  int exponent;
+  std::frexp(value, &exponent);                                // value = m * 2^exponent, 0.5 <= |m| < 1
+  const int quantum = std::max(exponent - 1, -14) - 10;        // the half grid's step at this magnitude
+  const double rounded = std::ldexp(std::nearbyint(std::ldexp(value, -quantum)), quantum);
+  return roundF16((float)rounded);                             // exact, or the overflow to infinity
+}
 }  // namespace
 
 float roundF16(float value) { return num::roundF16(value); }
@@ -263,7 +275,7 @@ void windowNormalizeRef(const float* qkvRow, uint32_t head, float scale, float* 
     float r[16];
     for (int c = 0; c < 16; ++c) {
       float highSquare = roundF16(x[c + 16] * x[c + 16]);
-      r[c] = roundF16((float)((double)x[c] * (double)x[c] + (double)highSquare));  // exact half fma
+      r[c] = roundF16Exact((double)x[c] * (double)x[c] + (double)highSquare);  // a half fma: exact in double
     }
     for (int stride = 8; stride > 0; stride >>= 1)
       for (int c = 0; c < stride; ++c) r[c] = addF16(r[c], r[c + stride]);
