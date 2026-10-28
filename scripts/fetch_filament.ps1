@@ -15,14 +15,22 @@ if (-not (Test-Path (Join-Path $dir "CMakeLists.txt"))) {
 }
 $patch = Join-Path $root "third_party\filament.patch"
 if (Test-Path $patch) {
+  # One of the two checks fails by design (the patch applies one way only), and Windows PowerShell 5.1 turns a native
+  # command's redirected stderr into an error that "Stop" makes terminating: the checks run with "Continue".
+  $ErrorActionPreference = "Continue"
   git -C $dir apply --check $patch 2>$null
-  if ($LASTEXITCODE -eq 0) {
+  $applies = $LASTEXITCODE -eq 0
+  git -C $dir apply --check --reverse $patch 2>$null
+  $applied = $LASTEXITCODE -eq 0
+  $ErrorActionPreference = "Stop"
+  if ($applies) {
     git -C $dir apply $patch
     if ($LASTEXITCODE -ne 0) { throw "patch failed" }
     Write-Host "patch applied"
+  } elseif ($applied) {
+    Write-Host "patch already applied"
   } else {
-    git -C $dir apply --check --reverse $patch 2>$null
-    if ($LASTEXITCODE -eq 0) { Write-Host "patch already applied" } else { throw "third_party/filament.patch does not apply cleanly to $tag (git -C $dir status)" }
+    throw "third_party/filament.patch does not apply cleanly to $tag (git -C $dir status)"
   }
 }
 Write-Host "Filament $tag ready at $dir"
