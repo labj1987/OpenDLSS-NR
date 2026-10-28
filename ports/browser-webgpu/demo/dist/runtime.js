@@ -6606,10 +6606,25 @@ var init_model_loader = __esm({
             { loaded, total, label: "DLSS model" }
           );
         });
-        model.activationCapacity = Math.round(
-          activationWidth * activationHeight * BYTES_PER_ROW * activationCapacityScale
-        );
+        model.activationCapacity = 0;
+        model.growActivationCapacity(activationWidth, activationHeight, activationCapacityScale);
         return model;
+      }
+      /**
+       * Make room for a padded field of this size: the capacity becomes its activation bytes times `scale`, and never
+       * shrinks. Nothing on the device changes - the weights stay where they are, and the buffers sized by the
+       * field are the pipeline's, rebuilt for each new field anyway. Returns the new capacity.
+       */
+      growActivationCapacity(fullWidth, fullHeight, scale = 1) {
+        this.activationCapacity = Math.max(
+          this.activationCapacity,
+          Math.round(this.activationBytesFor(fullWidth, fullHeight) * scale)
+        );
+        return this.activationCapacity;
+      }
+      /** Activation bytes for a padded field (the runtime's full dimensions), without headroom. */
+      activationBytesFor(fullWidth, fullHeight) {
+        return Math.round(fullWidth * fullHeight * BYTES_PER_ROW);
       }
       /** What a field of this size costs in activations, which is what decides whether a resize fits. */
       storageBindingSizeFor(width, height) {
@@ -9761,18 +9776,6 @@ function releasePresentedFrame() {
 function profileFullDimensions(runtimeProfile) {
   return runtimeProfile.fullDimensions ?? [runtimeProfile.dimensions[0][0] * 2, runtimeProfile.dimensions[0][1] * 2];
 }
-function destroyGpuRuntime() {
-  state.productionPipeline?.destroy();
-  state.productionPipeline = null;
-  state.srModel?.destroy();
-  state.srModel = null;
-  state.srInference = null;
-  state.model?.destroy();
-  state.model = null;
-  state.inference = null;
-  state.modelCapacity = null;
-  state.startupGraphWarmed = false;
-}
 function describeFrame(frame) {
   return `${frame.renderWidth}\xD7${frame.renderHeight} \u2192 ${frame.outputWidth}\xD7${frame.outputHeight}`;
 }
@@ -10255,8 +10258,11 @@ function modelProgress(message, error = false, download = null) {
 }
 async function ensureInference(runtimeProfile) {
   const [fullWidth, fullHeight] = profileFullDimensions(runtimeProfile);
-  if (state.model && (fullWidth > state.modelCapacity.width || fullHeight > state.modelCapacity.height)) {
-    destroyGpuRuntime();
+  if (state.model) {
+    const required = state.model.activationBytesFor(fullWidth, fullHeight);
+    if (required > state.modelCapacity) {
+      state.modelCapacity = state.model.growActivationCapacity(fullWidth, fullHeight, DEVICE_CAPACITY_HEADROOM);
+    }
   }
   if (!state.model) {
     state.model = await DlssNrWebGpuModel.create({

@@ -130,19 +130,6 @@ function profileFullDimensions(runtimeProfile) {
   return runtimeProfile.fullDimensions ?? [runtimeProfile.dimensions[0][0] * 2, runtimeProfile.dimensions[0][1] * 2];
 }
 
-function destroyGpuRuntime() {
-  state.productionPipeline?.destroy();
-  state.productionPipeline = null;
-  state.srModel?.destroy();
-  state.srModel = null;
-  state.srInference = null;
-  state.model?.destroy();
-  state.model = null;
-  state.inference = null;
-  state.modelCapacity = null;
-  state.startupGraphWarmed = false;
-}
-
 function describeFrame(frame) {
   return `${frame.renderWidth}×${frame.renderHeight} → ${frame.outputWidth}×${frame.outputHeight}`;
 }
@@ -554,10 +541,16 @@ function modelProgress(message, error = false, download = null) {
 
 async function ensureInference(runtimeProfile) {
   const [fullWidth, fullHeight] = profileFullDimensions(runtimeProfile);
-  if (state.model && (fullWidth > state.modelCapacity.width || fullHeight > state.modelCapacity.height)) {
-    // Growth beyond the device limit is uncommon. The CPU weight cache makes
-    // this a GPU-only rebuild rather than another 140 MiB transfer.
-    destroyGpuRuntime();
+  if (state.model) {
+    // A field larger than the activation capacity the model was sized for.
+    // The device already has the adapter's largest limits and the weights
+    // stay on it, so growing reallocates only the field-sized buffers (the
+    // pipeline's next build, which frees the old field's first), never the
+    // device or another 140 MiB weight download.
+    const required = state.model.activationBytesFor(fullWidth, fullHeight);
+    if (required > state.modelCapacity) {
+      state.modelCapacity = state.model.growActivationCapacity(fullWidth, fullHeight, DEVICE_CAPACITY_HEADROOM);
+    }
   }
   if (!state.model) {
     state.model = await DlssNrWebGpuModel.create({
